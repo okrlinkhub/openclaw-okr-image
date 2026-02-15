@@ -15,30 +15,50 @@ for var_name in "${required_vars[@]}"; do
   fi
 done
 
-ALLOWED_SKILLS_JSON_VALUE="${ALLOWED_SKILLS_JSON:-[\"linkhub-bridge\"]}"
+mkdir -p /data /data/openclaw
 
-mkdir -p /data
+# Persistenza esplicita stato/config OpenClaw sul volume Fly.
+export OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-/data/openclaw/state}"
+export OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-/data/openclaw/config.json}"
+mkdir -p "${OPENCLAW_STATE_DIR}"
 
-# Se non esiste il character file, crealo in modo idempotente.
-if [ ! -f "/data/character.json" ]; then
-  cat > /data/character.json <<EOF
+gateway_port="${OPENCLAW_GATEWAY_PORT:-3000}"
+gateway_bind="${OPENCLAW_GATEWAY_BIND:-lan}"
+config_dir="$(dirname "${OPENCLAW_CONFIG_PATH}")"
+mkdir -p "${config_dir}"
+
+# Workaround per versioni CLI che richiedono config esplicita
+# anche quando viene passato --allow-unconfigured.
+if [ ! -f "${OPENCLAW_CONFIG_PATH}" ]; then
+  cat > "${OPENCLAW_CONFIG_PATH}" <<EOF
 {
-  "name": "${AGENT_NAME:-Coach}",
-  "clients": ["telegram", "discord"],
-  "modelProvider": "openai",
-  "skills": ${ALLOWED_SKILLS_JSON_VALUE},
-  "settings": {
-    "secrets": {
-      "OPENAI_API_KEY": "${OPENAI_API_KEY}"
-    }
-  },
-  "bio": [
-    "Sono un coach OKR dedicato per ${USER_NAME}",
-    "Aiuto a raggiungere gli obiettivi con metodo LinkHub"
-  ]
+  "gateway": {
+    "mode": "local",
+    "bind": "${gateway_bind}",
+    "port": ${gateway_port}
+  }
 }
 EOF
 fi
 
-# Avvia OpenClaw con character persistito.
-cd /app && exec openclaw run --character /data/character.json
+gateway_args=(
+  gateway
+  run
+  --allow-unconfigured
+  --dev
+  --bind "${gateway_bind}"
+  --port "${gateway_port}"
+)
+
+if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
+  gateway_args+=(--token "${OPENCLAW_GATEWAY_TOKEN}")
+fi
+
+if [ -f /app/openclaw.mjs ]; then
+  exec node /app/openclaw.mjs "${gateway_args[@]}"
+elif command -v openclaw >/dev/null 2>&1; then
+  exec openclaw "${gateway_args[@]}"
+else
+  echo '{"error":"OpenClaw CLI not found (/app/openclaw.mjs or openclaw binary)"}' >&2
+  exit 1
+fi

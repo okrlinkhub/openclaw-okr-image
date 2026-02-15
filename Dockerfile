@@ -1,4 +1,6 @@
-FROM openclaw/openclaw:latest
+FROM ghcr.io/openclaw/openclaw:latest
+
+USER root
 
 WORKDIR /app
 
