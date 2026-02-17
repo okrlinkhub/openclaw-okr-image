@@ -3,3 +3,18 @@ primary_region = "iad"
 
 [build]
   dockerfile = "Dockerfile"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 3000
+  auto_start_machines = true
+  auto_stop_machines = false
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
+
+  [[services.tcp_checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "240s"
