@@ -1,20 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-# Variabili minime richieste per la skill linkhub-bridge.
-required_vars=(
-  "AGENT_BRIDGE_URL"
-  "OPENCLAW_SERVICE_ID"
-  "OPENCLAW_SERVICE_KEY"
-)
-
-for var_name in "${required_vars[@]}"; do
-  if [ -z "${!var_name:-}" ]; then
-    echo "{\"error\":\"${var_name} not set\"}" >&2
-    exit 1
-  fi
-done
-
 mkdir -p /data /data/openclaw
 
 # Pulisce lock/runtime temporanei a ogni boot per evitare stalli

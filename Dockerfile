@@ -7,21 +7,22 @@ WORKDIR /app
 # Assicura runtime Node per gli script skill.
 # Supporta sia immagini Alpine che Debian/Ubuntu.
 RUN if command -v apk >/dev/null 2>&1; then \
-      apk add --no-cache nodejs npm; \
+      apk add --no-cache nodejs; \
     elif command -v apt-get >/dev/null 2>&1; then \
-      apt-get update && apt-get install -y nodejs npm && rm -rf /var/lib/apt/lists/*; \
+      apt-get update && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; \
     else \
       echo "Unsupported base image: cannot install nodejs"; \
       exit 1; \
     fi
 
 # Verifica hard-fail anti regressioni build.
-RUN node --version && npm --version
+RUN node --version
 
 RUN mkdir -p /data /app/skills
 
 COPY skills/ /app/skills/
-RUN chmod +x /app/skills/linkhub-bridge/scripts/*.js
+# Rende eseguibili eventuali script skills senza legarsi a una skill specifica.
+RUN find /app/skills -type f -path "*/scripts/*" -exec chmod +x {} +
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
