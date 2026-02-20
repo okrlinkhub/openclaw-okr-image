@@ -1,20 +1,11 @@
-app = "linkhub-agents"
+app = "agent-factory-workers"
 primary_region = "iad"
 
 [build]
   dockerfile = "Dockerfile"
 
-[[services]]
-  protocol = "tcp"
-  internal_port = 3000
-  auto_start_machines = true
-  auto_stop_machines = false
+[env]
+  NODE_ENV = "production"
 
-  [[services.ports]]
-    handlers = ["tls", "http"]
-    port = 443
-
-  [[services.tcp_checks]]
-    interval = "15s"
-    timeout = "5s"
-    grace_period = "240s"
+[experimental]
+  auto_rollback = true

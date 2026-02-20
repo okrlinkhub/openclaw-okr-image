@@ -24,9 +24,8 @@ COPY skills/ /app/skills/
 # Rende eseguibili eventuali script skills senza legarsi a una skill specifica.
 RUN find /app/skills -type f -path "*/scripts/*" -exec chmod +x {} +
 
+COPY worker.js /app/worker.js
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
-
-EXPOSE 3000
 
 ENTRYPOINT ["/entrypoint.sh"]
