@@ -825,11 +825,8 @@ async function run() {
   while (!shuttingDown) {
     try {
       const control = await getWorkerControlState();
-      if (control.shouldDrain) {
-        if (control.snapshotRequired) {
-          await createAndUploadSnapshot("drain");
-        }
-        shutdownReason = "drain";
+      if (control.shouldStop) {
+        shutdownReason = "signal";
         shuttingDown = true;
         continue;
       }
