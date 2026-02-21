@@ -5,7 +5,7 @@ import net from "node:net";
 
 const convexUrl = process.env.CONVEX_URL;
 const workerId = process.env.WORKER_ID || `afw-${Date.now()}`;
-const idleTimeoutMs = Number(process.env.IDLE_TIMEOUT_MS || 30000);
+const idleTimeoutMs = 300000;
 const pollMs = Number(process.env.POLL_INTERVAL_MS || 2000);
 const heartbeatIntervalMs = Number(process.env.HEARTBEAT_INTERVAL_MS || 10000);
 const requestTimeoutMs = Number(process.env.CONVEX_HTTP_TIMEOUT_MS || 20000);
@@ -25,6 +25,7 @@ if (!convexUrl) {
 
 let shuttingDown = false;
 let lastActivityAt = Date.now();
+let stickyConversationId = null;
 
 process.on("SIGTERM", () => {
   console.log("[worker] SIGTERM received");
@@ -96,8 +97,12 @@ async function sendTelegramMessage(payload, text, botToken) {
   }
 }
 
-async function claimJob() {
-  return convexCall("mutation", "example:workerClaim", { workerId });
+async function claimJob(conversationId) {
+  return convexCall("mutation", "example:workerClaim", { workerId, conversationId });
+}
+
+async function hasQueuedConversation(conversationId) {
+  return convexCall("query", "example:workerConversationHasQueued", { conversationId });
 }
 
 async function heartbeat(messageId, leaseId) {
@@ -423,12 +428,26 @@ async function run() {
         break;
       }
 
-      const job = await claimJob();
+      const job = await claimJob(stickyConversationId ?? undefined);
       if (!job) {
+        if (stickyConversationId) {
+          const hasQueued = await hasQueuedConversation(stickyConversationId);
+          if (hasQueued) {
+            lastActivityAt = Date.now();
+          }
+        }
         await sleep(pollMs);
         continue;
       }
 
+      if (!stickyConversationId) {
+        stickyConversationId = job.conversationId;
+        console.log(`[worker] Sticky conversation=${stickyConversationId}`);
+      } else if (job.conversationId !== stickyConversationId) {
+        throw new Error(
+          `sticky_mismatch: expected ${stickyConversationId}, got ${job.conversationId}`,
+        );
+      }
       lastActivityAt = Date.now();
       console.log(`[worker] Claimed messageId=${job.messageId} conversation=${job.conversationId}`);
 

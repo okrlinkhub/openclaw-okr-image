@@ -24,12 +24,11 @@ COPY skills/ /app/skills/
 # Rende eseguibili eventuali script skills senza legarsi a una skill specifica.
 RUN find /app/skills -type f -path "*/scripts/*" -exec chmod +x {} +
 
-COPY worker.js /app/worker.js
+COPY worker.mjs /app/worker.mjs
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-ENV OPENCLAW_COMMAND=/app/openclaw.mjs \
-    OPENCLAW_GATEWAY_HOST=127.0.0.1 \
+ENV OPENCLAW_GATEWAY_HOST=127.0.0.1 \
     OPENCLAW_GATEWAY_PORT=18789 \
     OPENCLAW_GATEWAY_URL=http://127.0.0.1:18789 \
     OPENCLAW_STATE_DIR=/data/.clawdbot \
@@ -39,8 +38,8 @@ ENV OPENCLAW_COMMAND=/app/openclaw.mjs \
     OPENCLAW_SETUP_COMMAND="node /app/openclaw.mjs --dev setup" \
     OPENCLAW_RUN_SETUP=false \
     OPENCLAW_SETUP_TIMEOUT_MS=120000 \
-    OPENCLAW_GATEWAY_COMMAND="node /app/openclaw.mjs gateway --allow-unconfigured --port 18789" \
-    OPENCLAW_GATEWAY_READY_TIMEOUT_MS=45000 \
+    OPENCLAW_GATEWAY_COMMAND="node /app/openclaw.mjs gateway" \
+    OPENCLAW_GATEWAY_READY_TIMEOUT_MS=30000 \
     OPENCLAW_GATEWAY_READY_POLL_MS=500
 
 ENTRYPOINT ["/entrypoint.sh"]

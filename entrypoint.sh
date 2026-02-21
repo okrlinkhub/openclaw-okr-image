@@ -8,8 +8,8 @@ if [ -z "${CONVEX_URL:-}" ]; then
   exit 1
 fi
 
-if [ ! -f "/app/worker.js" ]; then
-  echo "[entrypoint] FATAL: /app/worker.js not found" >&2
+if [ ! -f "/app/worker.mjs" ]; then
+  echo "[entrypoint] FATAL: /app/worker.mjs not found" >&2
   exit 1
 fi
 
@@ -31,10 +31,11 @@ export OPENCLAW_REQUIRE_DATA_MOUNT="${OPENCLAW_REQUIRE_DATA_MOUNT:-true}"
 export OPENCLAW_SETUP_COMMAND="${OPENCLAW_SETUP_COMMAND:-node /app/openclaw.mjs --dev setup}"
 export OPENCLAW_RUN_SETUP="${OPENCLAW_RUN_SETUP:-false}"
 export OPENCLAW_SETUP_TIMEOUT_MS="${OPENCLAW_SETUP_TIMEOUT_MS:-120000}"
-export OPENCLAW_GATEWAY_COMMAND="${OPENCLAW_GATEWAY_COMMAND:-node /app/openclaw.mjs gateway --allow-unconfigured --port ${OPENCLAW_GATEWAY_PORT}}"
-export OPENCLAW_GATEWAY_READY_TIMEOUT_MS="${OPENCLAW_GATEWAY_READY_TIMEOUT_MS:-45000}"
+export OPENCLAW_GATEWAY_COMMAND="${OPENCLAW_GATEWAY_COMMAND:-node /app/openclaw.mjs gateway}"
+export OPENCLAW_GATEWAY_READY_TIMEOUT_MS="${OPENCLAW_GATEWAY_READY_TIMEOUT_MS:-30000}"
 export OPENCLAW_GATEWAY_READY_POLL_MS="${OPENCLAW_GATEWAY_READY_POLL_MS:-500}"
 export OPENCLAW_GATEWAY_TOKEN="${OPENCLAW_GATEWAY_TOKEN:-}"
+export OPENCLAW_GATEWAY_READY_REQUIRED="${OPENCLAW_GATEWAY_READY_REQUIRED:-false}"
 
 gateway_pid=""
 worker_pid=""
@@ -137,7 +138,7 @@ fi
 if [ "${OPENCLAW_RUN_SETUP}" = "true" ]; then
   setup_timeout_s="$(( (OPENCLAW_SETUP_TIMEOUT_MS + 999) / 1000 ))"
   echo "[entrypoint] Running OpenClaw setup: ${OPENCLAW_SETUP_COMMAND} (timeout ${OPENCLAW_SETUP_TIMEOUT_MS} ms)"
-  if ! timeout "${setup_timeout_s}" bash -lc "${OPENCLAW_SETUP_COMMAND}"; then
+  if ! timeout "${setup_timeout_s}" eval "${OPENCLAW_SETUP_COMMAND}"; then
     echo "[entrypoint] FATAL: OpenClaw setup failed or timed out" >&2
     cleanup 1
   fi
@@ -146,37 +147,51 @@ else
 fi
 
 echo "[entrypoint] Starting OpenClaw gateway: ${OPENCLAW_GATEWAY_COMMAND}"
-bash -lc "${OPENCLAW_GATEWAY_COMMAND}" &
+echo "[entrypoint] gateway node=$(which node 2>&1)"
+eval "${OPENCLAW_GATEWAY_COMMAND}" 2>&1 &
 gateway_pid="$!"
 echo "[entrypoint] Gateway PID: ${gateway_pid}"
 
 started_at_ms="$(date +%s%3N)"
 ready_deadline_ms="$((started_at_ms + OPENCLAW_GATEWAY_READY_TIMEOUT_MS))"
+gateway_ready="false"
+poll_sleep="$(awk "BEGIN { print ${OPENCLAW_GATEWAY_READY_POLL_MS} / 1000 }")"
 
 while true; do
   if ! kill -0 "${gateway_pid}" >/dev/null 2>&1; then
-    echo "[entrypoint] FATAL: OpenClaw gateway exited before readiness" >&2
+    echo "[entrypoint] WARN: OpenClaw gateway exited before readiness" >&2
     wait "${gateway_pid}" || true
-    cleanup 1
+    if [ "${OPENCLAW_GATEWAY_READY_REQUIRED}" = "true" ]; then
+      cleanup 1
+    fi
+    break
   fi
 
-  # Gateway readiness is a local TCP probe; some gateway routes may not return HTTP 200 on "/".
-  if bash -lc "exec 3<>/dev/tcp/${OPENCLAW_GATEWAY_HOST}/${OPENCLAW_GATEWAY_PORT}" >/dev/null 2>&1; then
+  if (echo >/dev/tcp/${OPENCLAW_GATEWAY_HOST}/${OPENCLAW_GATEWAY_PORT}) 2>/dev/null; then
     echo "[entrypoint] Gateway port ready at ${OPENCLAW_GATEWAY_HOST}:${OPENCLAW_GATEWAY_PORT}"
+    gateway_ready="true"
     break
   fi
 
   now_ms="$(date +%s%3N)"
   if [ "${now_ms}" -ge "${ready_deadline_ms}" ]; then
-    echo "[entrypoint] FATAL: gateway readiness timeout (${OPENCLAW_GATEWAY_READY_TIMEOUT_MS} ms)" >&2
-    cleanup 1
+    echo "[entrypoint] WARN: gateway readiness timeout (${OPENCLAW_GATEWAY_READY_TIMEOUT_MS} ms)" >&2
+    if [ "${OPENCLAW_GATEWAY_READY_REQUIRED}" = "true" ]; then
+      cleanup 1
+    fi
+    break
   fi
 
-  sleep "$(awk "BEGIN { print ${OPENCLAW_GATEWAY_READY_POLL_MS} / 1000 }")"
+  sleep "${poll_sleep}"
 done
 
+if [ "${gateway_ready}" != "true" ]; then
+  echo "[entrypoint] Proceeding without confirmed gateway readiness"
+fi
+
+echo "[entrypoint] node=$(which node) version=$(node --version 2>&1) PATH=${PATH}"
 echo "[entrypoint] Starting worker process"
-node /app/worker.js &
+node /app/worker.mjs &
 worker_pid="$!"
 set +e
 wait "${worker_pid}"

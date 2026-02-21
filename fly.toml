@@ -18,14 +18,19 @@ primary_region = "iad"
   OPENCLAW_SETUP_COMMAND = "node /app/openclaw.mjs --dev setup"
   OPENCLAW_RUN_SETUP = "false"
   OPENCLAW_SETUP_TIMEOUT_MS = "90000"
-  OPENCLAW_GATEWAY_COMMAND = "node /app/openclaw.mjs gateway --allow-unconfigured --port 18789"
-  OPENCLAW_GATEWAY_READY_TIMEOUT_MS = "300000"
+  OPENCLAW_GATEWAY_COMMAND = "node /app/openclaw.mjs gateway"
+  OPENCLAW_GATEWAY_READY_TIMEOUT_MS = "30000"
   OPENCLAW_GATEWAY_READY_POLL_MS = "500"
   OPENCLAW_GATEWAY_CHECK_TIMEOUT_MS = "2500"
 
 [[mounts]]
   source = "openclaw_data"
   destination = "/data"
+
+[http_service]
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
 
 [experimental]
   auto_rollback = true
