@@ -32,10 +32,10 @@ export OPENCLAW_SETUP_COMMAND="${OPENCLAW_SETUP_COMMAND:-node /app/openclaw.mjs 
 export OPENCLAW_RUN_SETUP="${OPENCLAW_RUN_SETUP:-false}"
 export OPENCLAW_SETUP_TIMEOUT_MS="${OPENCLAW_SETUP_TIMEOUT_MS:-120000}"
 export OPENCLAW_GATEWAY_COMMAND="${OPENCLAW_GATEWAY_COMMAND:-node /app/openclaw.mjs gateway}"
-export OPENCLAW_GATEWAY_READY_TIMEOUT_MS="${OPENCLAW_GATEWAY_READY_TIMEOUT_MS:-30000}"
+export OPENCLAW_GATEWAY_READY_TIMEOUT_MS="${OPENCLAW_GATEWAY_READY_TIMEOUT_MS:-60000}"
 export OPENCLAW_GATEWAY_READY_POLL_MS="${OPENCLAW_GATEWAY_READY_POLL_MS:-500}"
 export OPENCLAW_GATEWAY_TOKEN="${OPENCLAW_GATEWAY_TOKEN:-}"
-export OPENCLAW_GATEWAY_READY_REQUIRED="${OPENCLAW_GATEWAY_READY_REQUIRED:-false}"
+export OPENCLAW_GATEWAY_READY_REQUIRED="${OPENCLAW_GATEWAY_READY_REQUIRED:-true}"
 export OPENCLAW_AGENT_MODEL="${OPENCLAW_AGENT_MODEL:-}"
 
 gateway_pid=""
@@ -111,16 +111,10 @@ if [ -z "${OPENCLAW_GATEWAY_TOKEN}" ]; then
 fi
 
 if [ ! -f "${OPENCLAW_CONFIG_PATH}" ]; then
-  if [ -n "${OPENCLAW_AGENT_MODEL}" ]; then
-    model_block="\"model\": { \"primary\": \"${OPENCLAW_AGENT_MODEL}\" },"
-  else
-    model_block=""
-  fi
   cat > "${OPENCLAW_CONFIG_PATH}" <<JSON
 {
   "agents": {
     "defaults": {
-      ${model_block}
       "workspace": "${OPENCLAW_WORKSPACE_DIR}"
     }
   },
@@ -131,6 +125,12 @@ if [ ! -f "${OPENCLAW_CONFIG_PATH}" ]; then
     "auth": {
       "mode": "token",
       "token": "${OPENCLAW_GATEWAY_TOKEN}"
+    },
+    "http": {
+      "endpoints": {
+        "responses": { "enabled": true },
+        "chatCompletions": { "enabled": true }
+      }
     },
     "trustedProxies": ["127.0.0.1"],
     "tailscale": {
@@ -143,22 +143,62 @@ JSON
   echo "[entrypoint] Seeded initial OpenClaw config"
 fi
 
-if [ -n "${OPENCLAW_AGENT_MODEL}" ] && [ -f "${OPENCLAW_CONFIG_PATH}" ]; then
-  node -e "
-    const fs = require('fs');
-    const p = '${OPENCLAW_CONFIG_PATH}';
-    const c = JSON.parse(fs.readFileSync(p, 'utf8'));
-    c.agents = c.agents || {};
-    c.agents.defaults = c.agents.defaults || {};
-    const want = '${OPENCLAW_AGENT_MODEL}';
-    const have = c.agents?.defaults?.model?.primary;
-    if (have !== want) {
-      c.agents.defaults.model = { primary: want };
-      fs.writeFileSync(p, JSON.stringify(c, null, 2));
-      console.log('[entrypoint] Updated agent model to ' + want);
+node -e "
+  const fs = require('fs');
+  const p = '${OPENCLAW_CONFIG_PATH}';
+  const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+  let changed = false;
+
+  c.agents = c.agents || {};
+  c.agents.defaults = c.agents.defaults || {};
+
+  // Clean up invalid 'fallback' key (singular) from prior versions
+  if (c.agents.defaults.model?.fallback) {
+    delete c.agents.defaults.model.fallback;
+    changed = true;
+    console.log('[entrypoint] Removed invalid model.fallback key');
+  }
+
+  const wantModel = process.env.OPENCLAW_AGENT_MODEL || '';
+  if (wantModel) {
+    const haveModel = c.agents.defaults.model?.primary;
+    const haveFallbacks = JSON.stringify(c.agents.defaults.model?.fallbacks || []);
+    const wantFallbacks = (wantModel.startsWith('moonshot/') && process.env.OPENAI_API_KEY)
+      ? ['openai/gpt-4o-mini'] : [];
+    if (haveModel !== wantModel || haveFallbacks !== JSON.stringify(wantFallbacks)) {
+      c.agents.defaults.model = { primary: wantModel };
+      if (wantFallbacks.length > 0) c.agents.defaults.model.fallbacks = wantFallbacks;
+      changed = true;
+      console.log('[entrypoint] Updated agent model to ' + wantModel +
+        (wantFallbacks.length ? ' (fallbacks: ' + wantFallbacks.join(', ') + ')' : ''));
     }
-  "
-fi
+  }
+
+  if (process.env.MOONSHOT_API_KEY) {
+    c.models = c.models || {};
+    c.models.mode = 'merge';
+    c.models.providers = c.models.providers || {};
+    if (!c.models.providers.moonshot) {
+      c.models.providers.moonshot = {
+        baseUrl: 'https://api.moonshot.ai/v1',
+        apiKey: '\${MOONSHOT_API_KEY}',
+        api: 'openai-completions',
+        models: [{
+          id: 'kimi-k2.5',
+          name: 'Kimi K2.5',
+          contextWindow: 256000,
+          maxTokens: 8192,
+        }],
+      };
+      changed = true;
+      console.log('[entrypoint] Added moonshot provider config');
+    }
+  }
+
+  if (changed) {
+    fs.writeFileSync(p, JSON.stringify(c, null, 2));
+  }
+"
 
 if [ "${OPENCLAW_RUN_SETUP}" = "true" ]; then
   setup_timeout_s="$(( (OPENCLAW_SETUP_TIMEOUT_MS + 999) / 1000 ))"
