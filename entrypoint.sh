@@ -178,9 +178,11 @@ node -e "
     c.models = c.models || {};
     c.models.mode = 'merge';
     c.models.providers = c.models.providers || {};
-    if (!c.models.providers.moonshot) {
+    const wantBase = 'https://api.moonshot.ai/v1';
+    const cur = c.models.providers.moonshot;
+    if (!cur || cur.baseUrl !== wantBase) {
       c.models.providers.moonshot = {
-        baseUrl: 'https://api.moonshot.ai/v1',
+        baseUrl: wantBase,
         apiKey: '\${MOONSHOT_API_KEY}',
         api: 'openai-completions',
         models: [{
@@ -191,7 +193,7 @@ node -e "
         }],
       };
       changed = true;
-      console.log('[entrypoint] Added moonshot provider config');
+      console.log('[entrypoint] Configured moonshot provider (Moonshot endpoint)');
     }
   }
 

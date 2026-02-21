@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID, sign } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+
 const convexUrl = process.env.CONVEX_URL;
 const workerId = process.env.WORKER_ID || `afw-${Date.now()}`;
 const idleTimeoutMs = 300000;
@@ -9,11 +13,21 @@ const requestTimeoutMs = Number(process.env.CONVEX_HTTP_TIMEOUT_MS || 20000);
 const workspaceId = process.env.WORKSPACE_ID || "default";
 const openClawEnabled = parseBooleanEnv(process.env.OPENCLAW_MVP_ENABLED, true);
 const openClawTimeoutMs = Number(process.env.OPENCLAW_TIMEOUT_MS || 120000);
+const openClawThinking = process.env.OPENCLAW_THINKING || "medium";
 const openClawGatewayUrl = process.env.OPENCLAW_GATEWAY_URL || "http://127.0.0.1:18789";
 const openClawGatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN || "";
+const openClawAgentModel = process.env.OPENCLAW_AGENT_MODEL || "";
+const openClawGatewayConnectTimeoutMs = Number(
+  process.env.OPENCLAW_GATEWAY_CONNECT_TIMEOUT_MS || 60000,
+);
+const openClawStateDir = process.env.OPENCLAW_STATE_DIR || "/data/.clawdbot";
 
 if (!convexUrl) {
   console.error("[worker] FATAL: CONVEX_URL is required");
+  process.exit(1);
+}
+if (typeof WebSocket === "undefined") {
+  console.error("[worker] FATAL: WebSocket is unavailable in this Node runtime");
   process.exit(1);
 }
 
@@ -58,7 +72,6 @@ async function convexCall(kind, path, args) {
     if (!response.ok) {
       throw new Error(`Convex ${kind} ${path} failed [${response.status}]: ${bodyText}`);
     }
-
     const parsed = bodyText ? JSON.parse(bodyText) : {};
     if (parsed.status === "error") {
       throw new Error(parsed.errorMessage || `Convex ${kind} ${path} returned error`);
@@ -80,10 +93,7 @@ async function sendTelegramMessage(payload, text, botToken) {
   const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-    }),
+    body: JSON.stringify({ chat_id: chatId, text }),
   });
   if (!response.ok) {
     const err = await response.text();
@@ -100,19 +110,11 @@ async function hasQueuedConversation(conversationId) {
 }
 
 async function heartbeat(messageId, leaseId) {
-  return convexCall("mutation", "example:workerHeartbeat", {
-    workerId,
-    messageId,
-    leaseId,
-  });
+  return convexCall("mutation", "example:workerHeartbeat", { workerId, messageId, leaseId });
 }
 
 async function complete(messageId, leaseId) {
-  return convexCall("mutation", "example:workerComplete", {
-    workerId,
-    messageId,
-    leaseId,
-  });
+  return convexCall("mutation", "example:workerComplete", { workerId, messageId, leaseId });
 }
 
 async function fail(messageId, leaseId, errorMessage) {
@@ -125,10 +127,7 @@ async function fail(messageId, leaseId, errorMessage) {
 }
 
 async function loadHydration(messageId) {
-  return convexCall("query", "example:workerHydrationBundle", {
-    messageId,
-    workspaceId,
-  });
+  return convexCall("query", "example:workerHydrationBundle", { messageId, workspaceId });
 }
 
 async function appendConversationMessages(conversationId, messages) {
@@ -144,17 +143,13 @@ function buildOpenClawPrompt(job, hydration) {
   const history = hydration?.conversationState?.contextHistory ?? [];
   const recentHistory = history.slice(-12);
   const incomingText = job?.payload?.messageText || "(empty message)";
-
   const sectionsText = promptSections
     .map((section) => `## ${section.section}\n${section.content}`)
     .join("\n\n");
-  const memoryText = memoryWindow
-    .map((row) => `- ${row.path}: ${row.excerpt}`)
-    .join("\n");
+  const memoryText = memoryWindow.map((row) => `- ${row.path}: ${row.excerpt}`).join("\n");
   const historyText = recentHistory
     .map((row) => `${row.role.toUpperCase()}: ${row.content}`)
     .join("\n");
-
   return [
     "You are OpenClaw runtime for a multi-tenant worker.",
     sectionsText ? `\n[HydrationSections]\n${sectionsText}` : "",
@@ -167,137 +162,401 @@ function buildOpenClawPrompt(job, hydration) {
     .join("\n");
 }
 
-async function waitForGatewayHttp(maxWaitMs = 60000) {
-  const deadline = Date.now() + maxWaitMs;
-  let attempt = 0;
-  while (Date.now() < deadline && !shuttingDown) {
-    try {
-      const r = await fetch(`${openClawGatewayUrl}/healthz`, {
-        signal: AbortSignal.timeout(5000),
-      });
-      if (r.ok || r.status === 404) {
-        console.log(`[gateway] HTTP endpoint ready at ${openClawGatewayUrl}`);
-        return;
-      }
-    } catch {}
-    attempt++;
-    const backoff = Math.min(1000 * 2 ** Math.min(attempt, 4), 8000);
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) break;
-    console.log(`[gateway] HTTP readiness check ${attempt} failed (retry in ${backoff}ms)`);
-    await sleep(Math.min(backoff, remaining));
-  }
-  throw new Error(`gateway_unavailable: HTTP endpoint not ready at ${openClawGatewayUrl} within ${maxWaitMs}ms`);
+function inferProviderFromModel(model) {
+  if (!model) return "openai";
+  const lower = String(model).toLowerCase();
+  if (lower.includes("/")) return lower.split("/")[0];
+  if (lower.includes("claude")) return "anthropic";
+  if (lower.includes("gemini")) return "google";
+  if (lower.includes("moonshot") || lower.includes("kimi")) return "moonshot";
+  if (lower.includes("gpt") || lower.includes("o1") || lower.includes("o3")) return "openai";
+  return "openai";
 }
 
-async function sendAgentMessageHttp(prompt) {
-  const headers = { "Content-Type": "application/json" };
-  if (openClawGatewayToken) {
-    headers["Authorization"] = `Bearer ${openClawGatewayToken}`;
+function normalizeModelRef(provider, model) {
+  const trimmed = String(model || "").trim();
+  if (!trimmed) return "";
+  if (trimmed.includes("/")) return trimmed;
+  return `${String(provider || "openai").trim()}/${trimmed}`;
+}
+
+function parseLlmPolicy(runtimeConfig) {
+  const explicitModel = String(openClawAgentModel || "").trim();
+  const configuredModel =
+    explicitModel || runtimeConfig?.["llm.primary.model"] || runtimeConfig?.model || "openai/gpt-4o-mini";
+  const configuredProvider =
+    explicitModel
+      ? inferProviderFromModel(configuredModel)
+      : runtimeConfig?.["llm.primary.provider"] || inferProviderFromModel(configuredModel);
+  const primary = {
+    provider: String(configuredProvider).toLowerCase(),
+    model: normalizeModelRef(configuredProvider, configuredModel),
+  };
+  const fallbacks = [];
+  const rawFallbacks = runtimeConfig?.["llm.fallbacks"];
+  if (typeof rawFallbacks === "string" && rawFallbacks.trim().length > 0) {
+    try {
+      const parsed = JSON.parse(rawFallbacks);
+      if (Array.isArray(parsed)) {
+        for (const entry of parsed) {
+          const provider = entry?.provider
+            ? String(entry.provider).toLowerCase()
+            : inferProviderFromModel(entry?.model);
+          const modelRef = entry?.model ? normalizeModelRef(provider, entry.model) : "";
+          if (provider && modelRef) {
+            fallbacks.push({ provider, model: modelRef });
+          }
+        }
+      }
+    } catch {
+      // ignore invalid fallback config
+    }
   }
-  headers["x-openclaw-agent-id"] = "main";
+  return { primary, fallbacks };
+}
 
-  const res = await fetch(`${openClawGatewayUrl}/v1/responses`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model: "openclaw",
-      input: prompt,
-      stream: false,
-    }),
-    signal: AbortSignal.timeout(openClawTimeoutMs),
-  });
+function buildProviderAttempts(policy) {
+  const seen = new Set();
+  const attempts = [];
+  for (const entry of [policy.primary, ...policy.fallbacks]) {
+    if (!entry?.provider || !entry?.model) continue;
+    const key = `${entry.provider}:${entry.model}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    attempts.push(entry);
+  }
+  return attempts;
+}
 
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`gateway_http_error: ${res.status} ${res.statusText} ${body}`);
+function shouldTryNextProvider(error) {
+  const message = String(error?.message || error);
+  return /timeout|network|429|5\d\d|rate|temporar|unavailable/i.test(message);
+}
+
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+function base64UrlEncode(buf) {
+  return buf.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/g, "");
+}
+function derivePublicKeyRaw(publicKeyPem) {
+  const key = createPublicKey(publicKeyPem);
+  const spki = key.export({ type: "spki", format: "der" });
+  if (
+    spki.length === ED25519_SPKI_PREFIX.length + 32 &&
+    spki.subarray(0, ED25519_SPKI_PREFIX.length).equals(ED25519_SPKI_PREFIX)
+  ) {
+    return spki.subarray(ED25519_SPKI_PREFIX.length);
+  }
+  return spki;
+}
+function loadOrCreateDeviceIdentity(filePath) {
+  try {
+    if (existsSync(filePath)) {
+      const parsed = JSON.parse(readFileSync(filePath, "utf8"));
+      if (
+        parsed &&
+        typeof parsed.deviceId === "string" &&
+        typeof parsed.publicKeyPem === "string" &&
+        typeof parsed.privateKeyPem === "string"
+      ) {
+        return parsed;
+      }
+    }
+  } catch {
+    // regenerate
+  }
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const deviceId = createHash("sha256").update(derivePublicKeyRaw(publicKeyPem)).digest("hex");
+  const identity = { version: 1, deviceId, publicKeyPem, privateKeyPem };
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, `${JSON.stringify(identity, null, 2)}\n`);
+  return identity;
+}
+function buildDeviceAuthPayload(params) {
+  const version = params.nonce ? "v2" : "v1";
+  const fields = [
+    version,
+    params.deviceId,
+    params.clientId,
+    params.clientMode,
+    params.role,
+    params.scopes.join(","),
+    String(params.signedAtMs),
+    params.token || "",
+  ];
+  if (version === "v2") fields.push(params.nonce || "");
+  return fields.join("|");
+}
+
+class GatewayClient {
+  constructor() {
+    this.ws = null;
+    this.connected = false;
+    this.pending = new Map();
+    this.runText = new Map();
+    this.connectInFlight = null;
+    this.identity = loadOrCreateDeviceIdentity(`${openClawStateDir}/identity/worker-device.json`);
   }
 
-  const data = await res.json();
-  const outputItem = data?.output?.find?.((o) => o.type === "message")
-    ?? data?.output?.[0];
-  const textContent = outputItem?.content?.find?.((c) => c.type === "output_text")
-    ?? outputItem?.content?.[0];
-  return textContent?.text || data?.output_text || data?.text || data?.content || JSON.stringify(data);
+  wsUrl() {
+    return openClawGatewayUrl.startsWith("http://")
+      ? `ws://${openClawGatewayUrl.slice(7)}`
+      : openClawGatewayUrl.startsWith("https://")
+      ? `wss://${openClawGatewayUrl.slice(8)}`
+      : openClawGatewayUrl;
+  }
+
+  async ensureConnected() {
+    if (this.connected && this.ws?.readyState === WebSocket.OPEN) return;
+    if (this.connectInFlight) return this.connectInFlight;
+    this.connectInFlight = this.connect();
+    try {
+      await this.connectInFlight;
+    } finally {
+      this.connectInFlight = null;
+    }
+  }
+
+  connect() {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(this.wsUrl());
+      this.ws = ws;
+      const timer = setTimeout(() => {
+        reject(new Error("gateway_connect_timeout"));
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+      }, openClawGatewayConnectTimeoutMs);
+
+      ws.addEventListener("message", (event) => {
+        let frame;
+        try {
+          frame = JSON.parse(String(event.data));
+        } catch {
+          return;
+        }
+
+        if (frame?.type === "event" && frame?.event === "connect.challenge") {
+          const nonce = typeof frame?.payload?.nonce === "string" ? frame.payload.nonce : undefined;
+          const scopes = ["operator.admin"];
+          const signedAtMs = Date.now();
+          const payload = buildDeviceAuthPayload({
+            deviceId: this.identity.deviceId,
+            clientId: "gateway-client",
+            clientMode: "backend",
+            role: "operator",
+            scopes,
+            signedAtMs,
+            token: openClawGatewayToken || null,
+            nonce,
+          });
+          const signature = base64UrlEncode(
+            sign(null, Buffer.from(payload, "utf8"), createPrivateKey(this.identity.privateKeyPem)),
+          );
+          ws.send(
+            JSON.stringify({
+              type: "req",
+              id: randomUUID(),
+              method: "connect",
+              params: {
+                minProtocol: 3,
+                maxProtocol: 3,
+                client: {
+                  id: "gateway-client",
+                  version: "1.0.0",
+                  platform: "linux",
+                  mode: "backend",
+                },
+                role: "operator",
+                scopes,
+                auth: openClawGatewayToken ? { token: openClawGatewayToken } : undefined,
+                device: {
+                  id: this.identity.deviceId,
+                  publicKey: base64UrlEncode(derivePublicKeyRaw(this.identity.publicKeyPem)),
+                  signature,
+                  signedAt: signedAtMs,
+                  nonce,
+                },
+              },
+            }),
+          );
+          return;
+        }
+
+        if (!this.connected && frame?.type === "res" && frame?.ok && frame?.payload?.type === "hello-ok") {
+          clearTimeout(timer);
+          this.connected = true;
+          resolve();
+          return;
+        }
+
+        if (frame?.type === "event" && frame?.event === "agent") {
+          const runId = frame?.payload?.runId;
+          const text = frame?.payload?.data?.text;
+          if (typeof runId === "string" && typeof text === "string") {
+            this.runText.set(runId, text);
+          }
+          return;
+        }
+
+        if (frame?.type === "res" && typeof frame?.id === "string") {
+          const pending = this.pending.get(frame.id);
+          if (!pending) return;
+          if (pending.expectFinal && frame?.payload?.status === "accepted") return;
+          this.pending.delete(frame.id);
+          if (frame.ok) pending.resolve(frame.payload);
+          else pending.reject(new Error(frame?.error?.message || "gateway request failed"));
+        }
+      });
+
+      ws.addEventListener("close", () => {
+        clearTimeout(timer);
+        this.connected = false;
+        for (const [, pending] of this.pending) {
+          pending.reject(new Error("gateway socket closed"));
+        }
+        this.pending.clear();
+      });
+
+      ws.addEventListener("error", () => {
+        clearTimeout(timer);
+        this.connected = false;
+      });
+    });
+  }
+
+  async request(method, params, { expectFinal = false, timeoutMs = 30000 } = {}) {
+    await this.ensureConnected();
+    return await new Promise((resolve, reject) => {
+      const id = randomUUID();
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`gateway timeout for ${method}`));
+      }, timeoutMs);
+      this.pending.set(id, {
+        expectFinal,
+        resolve: (payload) => {
+          clearTimeout(timer);
+          resolve(payload);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      });
+      this.ws.send(JSON.stringify({ type: "req", id, method, params }));
+    });
+  }
+
+  extractReplyText(payload) {
+    if (typeof payload?.result === "string" && payload.result.trim()) return payload.result.trim();
+    if (typeof payload?.result?.text === "string" && payload.result.text.trim()) {
+      return payload.result.text.trim();
+    }
+    if (typeof payload?.runId === "string") {
+      const streamedText = this.runText.get(payload.runId);
+      if (typeof streamedText === "string" && streamedText.trim()) return streamedText.trim();
+    }
+    return "";
+  }
+}
+
+const gatewayClient = new GatewayClient();
+
+async function runOpenClawAttempt({ attempt, prompt }) {
+  const modelRef = normalizeModelRef(attempt.provider, attempt.model);
+  await gatewayClient.request("sessions.patch", { key: "main", model: modelRef }, { timeoutMs: 15000 });
+  const payload = await gatewayClient.request(
+    "agent",
+    {
+      message: prompt,
+      sessionKey: "main",
+      thinking: openClawThinking,
+      idempotencyKey: randomUUID(),
+    },
+    { expectFinal: true, timeoutMs: openClawTimeoutMs },
+  );
+  const reply = gatewayClient.extractReplyText(payload);
+  if (!reply) {
+    throw new Error(`OpenClaw empty output for ${attempt.provider}/${attempt.model}`);
+  }
+  return reply;
 }
 
 async function runOpenClawMvp(job, hydration) {
-  const model = process.env.OPENCLAW_AGENT_MODEL
-    || hydration.runtimeConfig?.["llm.primary.model"]
-    || hydration.runtimeConfig?.model
-    || "gpt-5";
+  const policy = parseLlmPolicy(hydration.runtimeConfig || {});
+  const attempts = buildProviderAttempts(policy);
+  if (attempts.length === 0) {
+    throw new Error("all_providers_failed: no llm attempts configured");
+  }
   const prompt = buildOpenClawPrompt(job, hydration);
-  const reply = await sendAgentMessageHttp(prompt);
-  return { reply, model };
+  const errors = [];
+  for (const attempt of attempts) {
+    try {
+      const reply = await runOpenClawAttempt({ attempt, prompt });
+      return { reply, provider: attempt.provider, model: attempt.model };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`${attempt.provider}/${attempt.model}: ${message}`);
+      if (!shouldTryNextProvider(error)) break;
+    }
+  }
+  throw new Error(`all_providers_failed: ${errors.join(" | ")}`);
 }
 
 async function processJob(job, hydration) {
   const incomingText = job?.payload?.messageText || "(empty message)";
   const openClawResult = openClawEnabled
     ? await runOpenClawMvp(job, hydration)
-    : { reply: `Processed by ${workerId}: ${incomingText}`, model: "-" };
-
+    : { reply: `Processed by ${workerId}: ${incomingText}`, provider: "placeholder", model: "-" };
   const replyText = openClawResult.reply.trim();
   await appendConversationMessages(job.conversationId, [
     { role: "user", content: incomingText, at: Date.now() },
     { role: "assistant", content: replyText, at: Date.now() + 1 },
   ]);
   await sendTelegramMessage(job?.payload, replyText, hydration?.telegramBotToken);
-  console.log(`[worker] OpenClaw reply model=${openClawResult.model}`);
+  console.log(`[worker] OpenClaw reply provider=${openClawResult.provider} model=${openClawResult.model}`);
 }
 
 async function run() {
   console.log(`[worker] START workerId=${workerId}`);
   console.log(
-    `[worker] env CONVEX_URL=${convexUrl ? "SET" : "MISSING"} WORKSPACE_ID=${workspaceId} OPENCLAW_MVP_ENABLED=${openClawEnabled} OPENCLAW_GATEWAY_URL=${openClawGatewayUrl}`,
+    `[worker] env CONVEX_URL=${convexUrl ? "SET" : "MISSING"} WORKSPACE_ID=${workspaceId} OPENCLAW_MVP_ENABLED=${openClawEnabled} OPENCLAW_GATEWAY_URL=${openClawGatewayUrl} OPENCLAW_AGENT_MODEL=${openClawAgentModel || "-"}`,
   );
-
-  if (openClawEnabled) {
-    console.log("[worker] Waiting for gateway HTTP endpoint...");
-    await waitForGatewayHttp();
-  }
-
   while (!shuttingDown) {
     try {
       if (Date.now() - lastActivityAt > idleTimeoutMs) {
         console.log("[worker] Idle timeout reached, exiting");
         break;
       }
-
       const job = await claimJob(stickyConversationId ?? undefined);
       if (!job) {
         if (stickyConversationId) {
           const hasQueued = await hasQueuedConversation(stickyConversationId);
-          if (hasQueued) {
-            lastActivityAt = Date.now();
-          }
+          if (hasQueued) lastActivityAt = Date.now();
         }
         await sleep(pollMs);
         continue;
       }
-
       if (!stickyConversationId) {
         stickyConversationId = job.conversationId;
         console.log(`[worker] Sticky conversation=${stickyConversationId}`);
       } else if (job.conversationId !== stickyConversationId) {
-        throw new Error(
-          `sticky_mismatch: expected ${stickyConversationId}, got ${job.conversationId}`,
-        );
+        throw new Error(`sticky_mismatch: expected ${stickyConversationId}, got ${job.conversationId}`);
       }
       lastActivityAt = Date.now();
       console.log(`[worker] Claimed messageId=${job.messageId} conversation=${job.conversationId}`);
-
       const hydration = await loadHydration(job.messageId);
-      if (!hydration) {
-        throw new Error(`Missing hydration bundle for messageId=${job.messageId}`);
-      }
+      if (!hydration) throw new Error(`Missing hydration bundle for messageId=${job.messageId}`);
 
       const beat = setInterval(() => {
         heartbeat(job.messageId, job.leaseId).catch((err) => {
           console.error(`[worker] heartbeat failed: ${err?.message || err}`);
         });
       }, heartbeatIntervalMs);
-
       try {
         await processJob(job, hydration);
         await complete(job.messageId, job.leaseId);
@@ -315,12 +574,11 @@ async function run() {
       await sleep(Math.max(5000, pollMs));
     }
   }
-
   console.log("[worker] Exit clean");
   process.exit(0);
 }
 
-run().catch(async (err) => {
+run().catch((err) => {
   const message = err instanceof Error ? err.message : String(err);
   console.error(`[worker] FATAL: ${message}`);
   process.exit(isRetryableError(err) ? 1 : 2);
