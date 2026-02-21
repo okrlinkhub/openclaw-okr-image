@@ -3,7 +3,7 @@
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { dirname } from "node:path";
+import { basename, dirname, extname } from "node:path";
 
 const convexUrl = process.env.CONVEX_URL;
 const workerId = process.env.WORKER_ID || `afw-${Date.now()}`;
@@ -107,6 +107,85 @@ async function sendTelegramMessage(payload, text, botToken) {
     const err = await response.text();
     throw new Error(`Telegram sendMessage failed: ${err}`);
   }
+}
+
+function resolveTelegramChatId(payload) {
+  if (!payload || payload.provider !== "telegram") return null;
+  return payload?.metadata?.telegramChatId || payload.providerUserId || null;
+}
+
+function mimeTypeForAudioPath(filePath) {
+  const ext = extname(filePath).toLowerCase();
+  if (ext === ".mp3") return "audio/mpeg";
+  if (ext === ".wav") return "audio/wav";
+  if (ext === ".ogg") return "audio/ogg";
+  if (ext === ".m4a") return "audio/mp4";
+  if (ext === ".aac") return "audio/aac";
+  if (ext === ".flac") return "audio/flac";
+  return "application/octet-stream";
+}
+
+async function sendTelegramAudioFromPath(payload, filePath, botToken, caption) {
+  if (!botToken) {
+    throw new Error("Bot not paired: missing telegram token in hydration bundle");
+  }
+  if (!payload || payload.provider !== "telegram") return false;
+  if (!filePath || !existsSync(filePath)) return false;
+  const chatId = resolveTelegramChatId(payload);
+  if (!chatId) return false;
+
+  const buffer = readFileSync(filePath);
+  const form = new FormData();
+  form.set("chat_id", chatId);
+  if (typeof caption === "string" && caption.trim()) {
+    form.set("caption", caption.trim().slice(0, 1024));
+  }
+  form.set(
+    "audio",
+    new Blob([buffer], { type: mimeTypeForAudioPath(filePath) }),
+    basename(filePath),
+  );
+
+  const response = await fetch(`https://api.telegram.org/bot${botToken}/sendAudio`, {
+    method: "POST",
+    body: form,
+  });
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Telegram sendAudio failed: ${err}`);
+  }
+  return true;
+}
+
+function extractAudioPathsFromText(text) {
+  if (typeof text !== "string" || !text.trim()) return [];
+  const matches = text.match(/\/tmp\/[^\s"'`]+?\.(?:mp3|wav|ogg|m4a|aac|flac)/gi) || [];
+  return [...new Set(matches)];
+}
+
+function extractAudioPathsFromPayload(payload) {
+  const candidates = [];
+  if (typeof payload?.result === "string") candidates.push(payload.result);
+  if (typeof payload?.result?.text === "string") candidates.push(payload.result.text);
+  if (typeof payload?.result?.message === "string") candidates.push(payload.result.message);
+  if (typeof payload?.output === "string") candidates.push(payload.output);
+  if (typeof payload?.text === "string") candidates.push(payload.text);
+  return [...new Set(candidates.flatMap((value) => extractAudioPathsFromText(value)))];
+}
+
+function stripMediaControlLines(text) {
+  if (typeof text !== "string") return "";
+  return text
+    .split("\n")
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return true;
+      if (/^MEDIA:\s*\/tmp\//i.test(trimmed)) return false;
+      if (/^send\s*[·-]\s*\/tmp\//i.test(trimmed)) return false;
+      return true;
+    })
+    .join("\n")
+    .trim();
 }
 
 async function fetchTelegramFileBlob(botToken, fileId) {
@@ -660,13 +739,23 @@ async function runOpenClawAttempt({ attempt, prompt }) {
   if (!reply) {
     throw new Error(`OpenClaw empty output for ${attempt.provider}/${attempt.model}`);
   }
-  return reply;
+  const runText = typeof payload?.runId === "string" ? gatewayClient.runText.get(payload.runId) : "";
+  const audioPaths = [
+    ...extractAudioPathsFromPayload(payload),
+    ...extractAudioPathsFromText(runText),
+    ...extractAudioPathsFromText(reply),
+  ];
+  return { reply, payload, audioPaths: [...new Set(audioPaths)] };
 }
 
 async function runOpenClawMvp(job, hydration) {
   const prompt = buildOpenClawPrompt(job, hydration);
-  const reply = await runOpenClawAttempt({ attempt: null, prompt });
-  return { reply, provider: "gateway", model: openClawAgentModel || "configured" };
+  const attemptResult = await runOpenClawAttempt({ attempt: null, prompt });
+  return {
+    ...attemptResult,
+    provider: "gateway",
+    model: openClawAgentModel || "configured",
+  };
 }
 
 async function processJob(job, hydration) {
@@ -689,13 +778,37 @@ async function processJob(job, hydration) {
         },
         hydration,
       )
-    : { reply: `Processed by ${workerId}: ${enrichedIncomingText}`, provider: "placeholder", model: "-" };
-  const replyText = openClawResult.reply.trim();
+    : {
+        reply: `Processed by ${workerId}: ${enrichedIncomingText}`,
+        payload: null,
+        audioPaths: [],
+        provider: "placeholder",
+        model: "-",
+      };
+  const replyText = stripMediaControlLines(openClawResult.reply);
+  const audioPath = openClawResult.audioPaths.find((path) => existsSync(path));
   await appendConversationMessages(job.conversationId, [
     { role: "user", content: enrichedIncomingText, at: Date.now() },
-    { role: "assistant", content: replyText, at: Date.now() + 1 },
+    { role: "assistant", content: replyText || "(audio)", at: Date.now() + 1 },
   ]);
-  await sendTelegramMessage(job?.payload, replyText, hydration?.telegramBotToken);
+  if (audioPath) {
+    const sentAudio = await sendTelegramAudioFromPath(
+      job?.payload,
+      audioPath,
+      hydration?.telegramBotToken,
+      replyText || undefined,
+    );
+    if (sentAudio) {
+      console.log(`[worker] Sent native Telegram audio: ${audioPath}`);
+      if (!replyText || replyText.length <= 1024) {
+        console.log(`[worker] OpenClaw reply provider=${openClawResult.provider} model=${openClawResult.model}`);
+        return;
+      }
+    }
+  }
+  if (replyText) {
+    await sendTelegramMessage(job?.payload, replyText, hydration?.telegramBotToken);
+  }
   console.log(`[worker] OpenClaw reply provider=${openClawResult.provider} model=${openClawResult.model}`);
 }
 
