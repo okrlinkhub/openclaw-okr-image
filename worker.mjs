@@ -162,77 +162,6 @@ function buildOpenClawPrompt(job, hydration) {
     .join("\n");
 }
 
-function inferProviderFromModel(model) {
-  if (!model) return "openai";
-  const lower = String(model).toLowerCase();
-  if (lower.includes("/")) return lower.split("/")[0];
-  if (lower.includes("claude")) return "anthropic";
-  if (lower.includes("gemini")) return "google";
-  if (lower.includes("moonshot") || lower.includes("kimi")) return "moonshot";
-  if (lower.includes("gpt") || lower.includes("o1") || lower.includes("o3")) return "openai";
-  return "openai";
-}
-
-function normalizeModelRef(provider, model) {
-  const trimmed = String(model || "").trim();
-  if (!trimmed) return "";
-  if (trimmed.includes("/")) return trimmed;
-  return `${String(provider || "openai").trim()}/${trimmed}`;
-}
-
-function parseLlmPolicy(runtimeConfig) {
-  const explicitModel = String(openClawAgentModel || "").trim();
-  const configuredModel =
-    explicitModel || runtimeConfig?.["llm.primary.model"] || runtimeConfig?.model || "openai/gpt-4o-mini";
-  const configuredProvider =
-    explicitModel
-      ? inferProviderFromModel(configuredModel)
-      : runtimeConfig?.["llm.primary.provider"] || inferProviderFromModel(configuredModel);
-  const primary = {
-    provider: String(configuredProvider).toLowerCase(),
-    model: normalizeModelRef(configuredProvider, configuredModel),
-  };
-  const fallbacks = [];
-  const rawFallbacks = runtimeConfig?.["llm.fallbacks"];
-  if (typeof rawFallbacks === "string" && rawFallbacks.trim().length > 0) {
-    try {
-      const parsed = JSON.parse(rawFallbacks);
-      if (Array.isArray(parsed)) {
-        for (const entry of parsed) {
-          const provider = entry?.provider
-            ? String(entry.provider).toLowerCase()
-            : inferProviderFromModel(entry?.model);
-          const modelRef = entry?.model ? normalizeModelRef(provider, entry.model) : "";
-          if (provider && modelRef) {
-            fallbacks.push({ provider, model: modelRef });
-          }
-        }
-      }
-    } catch {
-      // ignore invalid fallback config
-    }
-  }
-  return { primary, fallbacks };
-}
-
-function buildProviderAttempts(policy) {
-  const seen = new Set();
-  const attempts = [];
-  for (const entry of [policy.primary, ...policy.fallbacks]) {
-    if (!entry?.provider || !entry?.model) continue;
-    const key = `${entry.provider}:${entry.model}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    attempts.push(entry);
-  }
-  return attempts;
-}
-
-function shouldTryNextProvider(error) {
-  const message = String(error?.message || error);
-  return /timeout|network|429|5\d\d|rate|temporar|unavailable/i.test(message);
-}
-
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 function base64UrlEncode(buf) {
   return buf.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/g, "");
@@ -467,13 +396,11 @@ class GatewayClient {
 const gatewayClient = new GatewayClient();
 
 async function runOpenClawAttempt({ attempt, prompt }) {
-  const modelRef = normalizeModelRef(attempt.provider, attempt.model);
-  await gatewayClient.request("sessions.patch", { key: "main", model: modelRef }, { timeoutMs: 15000 });
   const payload = await gatewayClient.request(
     "agent",
     {
       message: prompt,
-      sessionKey: "main",
+      agentId: "main",
       thinking: openClawThinking,
       idempotencyKey: randomUUID(),
     },
@@ -487,24 +414,9 @@ async function runOpenClawAttempt({ attempt, prompt }) {
 }
 
 async function runOpenClawMvp(job, hydration) {
-  const policy = parseLlmPolicy(hydration.runtimeConfig || {});
-  const attempts = buildProviderAttempts(policy);
-  if (attempts.length === 0) {
-    throw new Error("all_providers_failed: no llm attempts configured");
-  }
   const prompt = buildOpenClawPrompt(job, hydration);
-  const errors = [];
-  for (const attempt of attempts) {
-    try {
-      const reply = await runOpenClawAttempt({ attempt, prompt });
-      return { reply, provider: attempt.provider, model: attempt.model };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      errors.push(`${attempt.provider}/${attempt.model}: ${message}`);
-      if (!shouldTryNextProvider(error)) break;
-    }
-  }
-  throw new Error(`all_providers_failed: ${errors.join(" | ")}`);
+  const reply = await runOpenClawAttempt({ attempt: null, prompt });
+  return { reply, provider: "gateway", model: openClawAgentModel || "configured" };
 }
 
 async function processJob(job, hydration) {
