@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID, sign } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { dirname } from "node:path";
 
 const convexUrl = process.env.CONVEX_URL;
 const workerId = process.env.WORKER_ID || `afw-${Date.now()}`;
-const idleTimeoutMs = 300000;
+const idleTimeoutMs = Number(process.env.WORKER_IDLE_TIMEOUT_MS || 300000);
 const pollMs = Number(process.env.POLL_INTERVAL_MS || 2000);
 const heartbeatIntervalMs = Number(process.env.HEARTBEAT_INTERVAL_MS || 10000);
 const requestTimeoutMs = Number(process.env.CONVEX_HTTP_TIMEOUT_MS || 20000);
@@ -21,6 +22,8 @@ const openClawGatewayConnectTimeoutMs = Number(
   process.env.OPENCLAW_GATEWAY_CONNECT_TIMEOUT_MS || 60000,
 );
 const openClawStateDir = process.env.OPENCLAW_STATE_DIR || "/data/.clawdbot";
+const openClawWorkspaceDir = process.env.OPENCLAW_WORKSPACE_DIR || "/data/workspace";
+const openClawAgentKey = process.env.OPENCLAW_AGENT_KEY || "default";
 
 if (!convexUrl) {
   console.error("[worker] FATAL: CONVEX_URL is required");
@@ -32,16 +35,21 @@ if (typeof WebSocket === "undefined") {
 }
 
 let shuttingDown = false;
+let shutdownReason = null;
 let lastActivityAt = Date.now();
 let stickyConversationId = null;
+let stickyAgentKey = openClawAgentKey;
+let snapshotCreatedForShutdown = false;
 
 process.on("SIGTERM", () => {
   console.log("[worker] SIGTERM received");
   shuttingDown = true;
+  shutdownReason = "signal";
 });
 process.on("SIGINT", () => {
   console.log("[worker] SIGINT received");
   shuttingDown = true;
+  shutdownReason = "signal";
 });
 
 function sleep(ms) {
@@ -101,6 +109,48 @@ async function sendTelegramMessage(payload, text, botToken) {
   }
 }
 
+async function fetchTelegramFileBlob(botToken, fileId) {
+  const fileResp = await fetch(`https://api.telegram.org/bot${botToken}/getFile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file_id: fileId }),
+  });
+  const fileJson = await fileResp.json();
+  if (!fileResp.ok || !fileJson?.ok || !fileJson?.result?.file_path) {
+    throw new Error(`Telegram getFile failed for ${fileId}`);
+  }
+
+  const filePath = fileJson.result.file_path;
+  const downloadResp = await fetch(`https://api.telegram.org/file/bot${botToken}/${filePath}`);
+  if (!downloadResp.ok) {
+    throw new Error(`Telegram file download failed for ${fileId}`);
+  }
+  const contentType = downloadResp.headers.get("content-type") || "application/octet-stream";
+  const buffer = Buffer.from(await downloadResp.arrayBuffer());
+  return { buffer, contentType, filePath };
+}
+
+async function uploadBlobToConvexStorage(buffer, contentType) {
+  const { uploadUrl } = await convexCall("mutation", "example:workerGenerateMediaUploadUrl", {});
+  const uploadResp = await fetch(uploadUrl, {
+    method: "POST",
+    headers: { "Content-Type": contentType },
+    body: buffer,
+  });
+  const uploadText = await uploadResp.text();
+  if (!uploadResp.ok) {
+    throw new Error(`Convex media upload failed [${uploadResp.status}]: ${uploadText}`);
+  }
+  const parsed = uploadText ? JSON.parse(uploadText) : {};
+  if (!parsed.storageId) {
+    throw new Error("Convex media upload missing storageId");
+  }
+  const storageUrl = await convexCall("query", "example:workerGetStorageFileUrl", {
+    storageId: parsed.storageId,
+  });
+  return { storageId: parsed.storageId, storageUrl };
+}
+
 async function claimJob(conversationId) {
   return convexCall("mutation", "example:workerClaim", { workerId, conversationId });
 }
@@ -133,13 +183,93 @@ async function loadHydration(messageId) {
 async function appendConversationMessages(conversationId, messages) {
   return convexCall("mutation", "example:workerAppendConversationMessages", {
     conversationId,
+    workspaceId,
     messages,
   });
+}
+
+async function getWorkerControlState() {
+  return convexCall("query", "example:workerControlState", { workerId });
+}
+
+async function prepareSnapshotUpload({ reason, conversationId }) {
+  return convexCall("mutation", "example:workerPrepareSnapshotUpload", {
+    workerId,
+    workspaceId,
+    agentKey: stickyAgentKey || openClawAgentKey,
+    conversationId,
+    reason,
+  });
+}
+
+async function finalizeSnapshotUpload(snapshotId, storageId, sha256, sizeBytes) {
+  return convexCall("mutation", "example:workerFinalizeSnapshotUpload", {
+    workerId,
+    snapshotId,
+    storageId,
+    sha256,
+    sizeBytes,
+  });
+}
+
+async function failSnapshotUpload(snapshotId, error) {
+  return convexCall("mutation", "example:workerFailSnapshotUpload", {
+    workerId,
+    snapshotId,
+    error,
+  });
+}
+
+async function getLatestSnapshotForRestore() {
+  return convexCall("query", "example:workerLatestSnapshotForRestore", {
+    workspaceId,
+    agentKey: stickyAgentKey || openClawAgentKey,
+  });
+}
+
+async function attachMessageMetadata(messageId, metadata) {
+  if (!metadata || Object.keys(metadata).length === 0) return;
+  await convexCall("mutation", "example:workerAttachMessageMetadata", {
+    messageId,
+    metadata,
+  });
+}
+
+async function materializeTelegramMedia(job, hydration) {
+  const metadata = job?.payload?.metadata || {};
+  const botToken = hydration?.telegramBotToken;
+  if (!botToken) return { lines: [], metadata: {} };
+
+  const mediaSpecs = [
+    { kind: "photo", fileId: metadata.telegramPhotoFileId },
+    { kind: "video", fileId: metadata.telegramVideoFileId },
+    { kind: "audio", fileId: metadata.telegramAudioFileId },
+    { kind: "voice", fileId: metadata.telegramVoiceFileId },
+  ].filter((item) => typeof item.fileId === "string" && item.fileId.length > 0);
+
+  const lines = [];
+  const nextMetadata = {};
+  for (const media of mediaSpecs) {
+    try {
+      const { buffer, contentType } = await fetchTelegramFileBlob(botToken, media.fileId);
+      const uploaded = await uploadBlobToConvexStorage(buffer, contentType);
+      if (!uploaded.storageUrl) continue;
+      const label = media.kind === "voice" ? "audio (voice)" : media.kind;
+      lines.push(`- ${label}: ${uploaded.storageUrl}`);
+      const keyBase = media.kind[0].toUpperCase() + media.kind.slice(1);
+      nextMetadata[`convex${keyBase}StorageId`] = uploaded.storageId;
+      nextMetadata[`convex${keyBase}Url`] = uploaded.storageUrl;
+    } catch (error) {
+      console.error(`[worker] media upload failed (${media.kind}): ${error?.message || error}`);
+    }
+  }
+  return { lines, metadata: nextMetadata };
 }
 
 function buildOpenClawPrompt(job, hydration) {
   const promptSections = hydration?.snapshot?.compiledPromptStack ?? [];
   const memoryWindow = hydration?.snapshot?.memoryWindow ?? [];
+  const skillsBundle = hydration?.snapshot?.skillsBundle ?? [];
   const history = hydration?.conversationState?.contextHistory ?? [];
   const recentHistory = history.slice(-12);
   const incomingText = job?.payload?.messageText || "(empty message)";
@@ -150,10 +280,21 @@ function buildOpenClawPrompt(job, hydration) {
   const historyText = recentHistory
     .map((row) => `${row.role.toUpperCase()}: ${row.content}`)
     .join("\n");
+  const skillsText = skillsBundle
+    .map((skill) => {
+      const assets = Array.isArray(skill.assets)
+        ? skill.assets.map((asset) => `${asset.assetType}:${asset.assetPath}`).join(", ")
+        : "";
+      return assets
+        ? `- ${skill.skillKey}: manifest + assets(${assets})`
+        : `- ${skill.skillKey}: manifest`;
+    })
+    .join("\n");
   return [
     "You are OpenClaw runtime for a multi-tenant worker.",
     sectionsText ? `\n[HydrationSections]\n${sectionsText}` : "",
     memoryText ? `\n[MemoryWindow]\n${memoryText}` : "",
+    skillsText ? `\n[Skills]\n${skillsText}` : "",
     historyText ? `\n[ConversationHistory]\n${historyText}` : "",
     `\n[UserMessage]\n${incomingText}`,
     "\nReturn only the assistant reply text.",
@@ -216,6 +357,115 @@ function buildDeviceAuthPayload(params) {
   ];
   if (version === "v2") fields.push(params.nonce || "");
   return fields.join("|");
+}
+
+function runCommand(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${command} exited with code ${code}: ${stderr.trim()}`));
+    });
+  });
+}
+
+function isDirEffectivelyEmpty(path) {
+  if (!existsSync(path)) return true;
+  try {
+    const entries = readdirSync(path);
+    if (entries.length === 0) return true;
+    if (entries.length === 1 && entries[0] === ".gitkeep") return true;
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function hasMeaningfulOpenClawState() {
+  const sessionsPath = `${openClawStateDir}/agents/main/sessions/sessions.json`;
+  if (existsSync(sessionsPath)) {
+    try {
+      const raw = readFileSync(sessionsPath, "utf8").trim();
+      if (raw && raw !== "{}") {
+        return true;
+      }
+    } catch {
+      return false;
+    }
+  }
+  return !isDirEffectivelyEmpty(openClawWorkspaceDir);
+}
+
+async function restoreSnapshotIfNeeded() {
+  if (hasMeaningfulOpenClawState()) {
+    return;
+  }
+  const restore = await getLatestSnapshotForRestore();
+  if (!restore?.downloadUrl) return;
+  const archivePath = `/tmp/${workerId}-restore-${Date.now()}.tar.gz`;
+  const response = await fetch(restore.downloadUrl);
+  if (!response.ok) {
+    throw new Error(`restore download failed: ${response.status}`);
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  writeFileSync(archivePath, bytes);
+  const downloadedSha = createHash("sha256").update(bytes).digest("hex");
+  if (restore.sha256 && restore.sha256 !== downloadedSha) {
+    throw new Error("restore checksum mismatch");
+  }
+  mkdirSync("/data", { recursive: true });
+  await runCommand("tar", ["-xzf", archivePath, "-C", "/data"]);
+  rmSync(archivePath, { force: true });
+  console.log(`[worker] Restored snapshot ${restore.snapshotId}`);
+}
+
+async function createAndUploadSnapshot(reason) {
+  const archivePath = `/tmp/${workerId}-${Date.now()}-${reason}.tar.gz`;
+  const upload = await prepareSnapshotUpload({
+    reason,
+    conversationId: stickyConversationId ?? undefined,
+  });
+  try {
+    await runCommand("tar", [
+      "-czf",
+      archivePath,
+      "-C",
+      "/data",
+      ".clawdbot",
+      "workspace",
+    ]);
+    const payload = readFileSync(archivePath);
+    const sha256 = createHash("sha256").update(payload).digest("hex");
+    const uploadResponse = await fetch(upload.uploadUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/gzip",
+      },
+      body: payload,
+    });
+    const uploadBody = await uploadResponse.text();
+    if (!uploadResponse.ok) {
+      throw new Error(`snapshot upload failed [${uploadResponse.status}]: ${uploadBody}`);
+    }
+    const parsed = uploadBody ? JSON.parse(uploadBody) : {};
+    if (!parsed.storageId) {
+      throw new Error("snapshot upload missing storageId");
+    }
+    await finalizeSnapshotUpload(upload.snapshotId, parsed.storageId, sha256, payload.length);
+    snapshotCreatedForShutdown = true;
+    console.log(`[worker] Snapshot uploaded snapshotId=${upload.snapshotId} reason=${reason}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await failSnapshotUpload(upload.snapshotId, message);
+    throw error;
+  } finally {
+    rmSync(archivePath, { force: true });
+  }
 }
 
 class GatewayClient {
@@ -421,12 +671,28 @@ async function runOpenClawMvp(job, hydration) {
 
 async function processJob(job, hydration) {
   const incomingText = job?.payload?.messageText || "(empty message)";
+  const media = await materializeTelegramMedia(job, hydration);
+  if (Object.keys(media.metadata).length > 0) {
+    await attachMessageMetadata(job.messageId, media.metadata);
+  }
+  const enrichedIncomingText = media.lines.length
+    ? `${incomingText}\n\n[telegram_media]\n${media.lines.join("\n")}`
+    : incomingText;
   const openClawResult = openClawEnabled
-    ? await runOpenClawMvp(job, hydration)
-    : { reply: `Processed by ${workerId}: ${incomingText}`, provider: "placeholder", model: "-" };
+    ? await runOpenClawMvp(
+        {
+          ...job,
+          payload: {
+            ...job.payload,
+            messageText: enrichedIncomingText,
+          },
+        },
+        hydration,
+      )
+    : { reply: `Processed by ${workerId}: ${enrichedIncomingText}`, provider: "placeholder", model: "-" };
   const replyText = openClawResult.reply.trim();
   await appendConversationMessages(job.conversationId, [
-    { role: "user", content: incomingText, at: Date.now() },
+    { role: "user", content: enrichedIncomingText, at: Date.now() },
     { role: "assistant", content: replyText, at: Date.now() + 1 },
   ]);
   await sendTelegramMessage(job?.payload, replyText, hydration?.telegramBotToken);
@@ -438,10 +704,25 @@ async function run() {
   console.log(
     `[worker] env CONVEX_URL=${convexUrl ? "SET" : "MISSING"} WORKSPACE_ID=${workspaceId} OPENCLAW_MVP_ENABLED=${openClawEnabled} OPENCLAW_GATEWAY_URL=${openClawGatewayUrl} OPENCLAW_AGENT_MODEL=${openClawAgentModel || "-"}`,
   );
+  try {
+    await restoreSnapshotIfNeeded();
+  } catch (error) {
+    console.error(`[worker] restore failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
   while (!shuttingDown) {
     try {
+      const control = await getWorkerControlState();
+      if (control.shouldDrain) {
+        if (control.snapshotRequired) {
+          await createAndUploadSnapshot("drain");
+        }
+        shutdownReason = "drain";
+        shuttingDown = true;
+        continue;
+      }
       if (Date.now() - lastActivityAt > idleTimeoutMs) {
         console.log("[worker] Idle timeout reached, exiting");
+        shutdownReason = "manual";
         break;
       }
       const job = await claimJob(stickyConversationId ?? undefined);
@@ -455,6 +736,7 @@ async function run() {
       }
       if (!stickyConversationId) {
         stickyConversationId = job.conversationId;
+        stickyAgentKey = job.agentKey || stickyAgentKey;
         console.log(`[worker] Sticky conversation=${stickyConversationId}`);
       } else if (job.conversationId !== stickyConversationId) {
         throw new Error(`sticky_mismatch: expected ${stickyConversationId}, got ${job.conversationId}`);
@@ -484,6 +766,15 @@ async function run() {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[worker] loop error: ${message}`);
       await sleep(Math.max(5000, pollMs));
+    }
+  }
+  if (!snapshotCreatedForShutdown) {
+    try {
+      await createAndUploadSnapshot(shutdownReason === "signal" ? "signal" : "manual");
+    } catch (error) {
+      console.error(
+        `[worker] snapshot before exit failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
   console.log("[worker] Exit clean");

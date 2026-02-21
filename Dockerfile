@@ -7,9 +7,9 @@ WORKDIR /app
 # Assicura runtime Node + curl per health check runtime.
 # Supporta sia immagini Alpine che Debian/Ubuntu.
 RUN if command -v apk >/dev/null 2>&1; then \
-      apk add --no-cache nodejs curl; \
+      apk add --no-cache nodejs curl tar; \
     elif command -v apt-get >/dev/null 2>&1; then \
-      apt-get update && apt-get install -y --no-install-recommends nodejs curl && rm -rf /var/lib/apt/lists/*; \
+      apt-get update && apt-get install -y --no-install-recommends nodejs curl tar && rm -rf /var/lib/apt/lists/*; \
     else \
       echo "Unsupported base image: cannot install nodejs"; \
       exit 1; \
