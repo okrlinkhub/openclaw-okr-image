@@ -316,9 +316,7 @@ async function runOpenClawAttempt({ attempt, prompt, hydration }) {
     throw new Error(`gateway_unavailable: cannot reach ${openClawGatewayUrl}`);
   }
 
-  // Keep CLI invocation minimal for cross-version compatibility.
-  // Provider/model selection is still passed via environment variables.
-  const args = ["agent", "--message", prompt];
+  const args = ["agent", "--agent", "main", "--message", prompt];
 
   return new Promise((resolve, reject) => {
     const child = spawn(openClawCommand, args, {

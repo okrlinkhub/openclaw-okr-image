@@ -36,6 +36,7 @@ export OPENCLAW_GATEWAY_READY_TIMEOUT_MS="${OPENCLAW_GATEWAY_READY_TIMEOUT_MS:-3
 export OPENCLAW_GATEWAY_READY_POLL_MS="${OPENCLAW_GATEWAY_READY_POLL_MS:-500}"
 export OPENCLAW_GATEWAY_TOKEN="${OPENCLAW_GATEWAY_TOKEN:-}"
 export OPENCLAW_GATEWAY_READY_REQUIRED="${OPENCLAW_GATEWAY_READY_REQUIRED:-false}"
+export OPENCLAW_AGENT_MODEL="${OPENCLAW_AGENT_MODEL:-}"
 
 gateway_pid=""
 worker_pid=""
@@ -104,15 +105,22 @@ if [ ! -f "${OPENCLAW_STATE_DIR}/agents/main/agent/auth-profiles.json" ]; then
 {"version":1,"profiles":{},"lastGood":{},"usageStats":{}}
 JSON
 fi
+if [ -z "${OPENCLAW_GATEWAY_TOKEN}" ]; then
+  OPENCLAW_GATEWAY_TOKEN="$(node -e 'console.log(require("node:crypto").randomBytes(24).toString("hex"))')"
+  export OPENCLAW_GATEWAY_TOKEN
+fi
+
 if [ ! -f "${OPENCLAW_CONFIG_PATH}" ]; then
-  if [ -z "${OPENCLAW_GATEWAY_TOKEN}" ]; then
-    OPENCLAW_GATEWAY_TOKEN="$(node -e 'console.log(require("node:crypto").randomBytes(24).toString("hex"))')"
-    export OPENCLAW_GATEWAY_TOKEN
+  if [ -n "${OPENCLAW_AGENT_MODEL}" ]; then
+    model_block="\"model\": { \"primary\": \"${OPENCLAW_AGENT_MODEL}\" },"
+  else
+    model_block=""
   fi
   cat > "${OPENCLAW_CONFIG_PATH}" <<JSON
 {
   "agents": {
     "defaults": {
+      ${model_block}
       "workspace": "${OPENCLAW_WORKSPACE_DIR}"
     }
   },
@@ -133,6 +141,23 @@ if [ ! -f "${OPENCLAW_CONFIG_PATH}" ]; then
 }
 JSON
   echo "[entrypoint] Seeded initial OpenClaw config"
+fi
+
+if [ -n "${OPENCLAW_AGENT_MODEL}" ] && [ -f "${OPENCLAW_CONFIG_PATH}" ]; then
+  node -e "
+    const fs = require('fs');
+    const p = '${OPENCLAW_CONFIG_PATH}';
+    const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+    c.agents = c.agents || {};
+    c.agents.defaults = c.agents.defaults || {};
+    const want = '${OPENCLAW_AGENT_MODEL}';
+    const have = c.agents?.defaults?.model?.primary;
+    if (have !== want) {
+      c.agents.defaults.model = { primary: want };
+      fs.writeFileSync(p, JSON.stringify(c, null, 2));
+      console.log('[entrypoint] Updated agent model to ' + want);
+    }
+  "
 fi
 
 if [ "${OPENCLAW_RUN_SETUP}" = "true" ]; then
