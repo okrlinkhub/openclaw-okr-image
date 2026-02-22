@@ -346,34 +346,14 @@ async function materializeTelegramMedia(job, hydration) {
 }
 
 function buildOpenClawPrompt(job, hydration) {
-  const promptSections = hydration?.snapshot?.compiledPromptStack ?? [];
-  const memoryWindow = hydration?.snapshot?.memoryWindow ?? [];
-  const skillsBundle = hydration?.snapshot?.skillsBundle ?? [];
   const history = hydration?.conversationState?.contextHistory ?? [];
   const recentHistory = history.slice(-12);
   const incomingText = job?.payload?.messageText || "(empty message)";
-  const sectionsText = promptSections
-    .map((section) => `## ${section.section}\n${section.content}`)
-    .join("\n\n");
-  const memoryText = memoryWindow.map((row) => `- ${row.path}: ${row.excerpt}`).join("\n");
   const historyText = recentHistory
     .map((row) => `${row.role.toUpperCase()}: ${row.content}`)
     .join("\n");
-  const skillsText = skillsBundle
-    .map((skill) => {
-      const assets = Array.isArray(skill.assets)
-        ? skill.assets.map((asset) => `${asset.assetType}:${asset.assetPath}`).join(", ")
-        : "";
-      return assets
-        ? `- ${skill.skillKey}: manifest + assets(${assets})`
-        : `- ${skill.skillKey}: manifest`;
-    })
-    .join("\n");
   return [
     "You are OpenClaw runtime for a multi-tenant worker.",
-    sectionsText ? `\n[HydrationSections]\n${sectionsText}` : "",
-    memoryText ? `\n[MemoryWindow]\n${memoryText}` : "",
-    skillsText ? `\n[Skills]\n${skillsText}` : "",
     historyText ? `\n[ConversationHistory]\n${historyText}` : "",
     `\n[UserMessage]\n${incomingText}`,
     "\nReturn only the assistant reply text.",
