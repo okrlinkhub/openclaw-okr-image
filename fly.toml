@@ -1,4 +1,4 @@
-app = "agent-factory-workers"
+app = "agent-factory-workers-linkhub-w4"
 primary_region = "iad"
 
 [build]
@@ -21,7 +21,7 @@ primary_region = "iad"
   OPENCLAW_GATEWAY_READY_REQUIRED = "true"
 
 [[mounts]]
-  source = "openclaw_data"
+  source = "openclaw_data_linkhub_w4"
   destination = "/data"
 
 [http_service]
