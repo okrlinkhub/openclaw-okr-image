@@ -560,13 +560,19 @@ class GatewayClient {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(this.wsUrl());
       this.ws = ws;
-      const timer = setTimeout(() => {
-        reject(new Error("gateway_connect_timeout"));
+      let connectSettled = false;
+      const failBeforeConnect = (reason) => {
+        if (connectSettled) return;
+        connectSettled = true;
+        reject(new Error(reason));
         try {
           ws.close();
         } catch {
           // ignore
         }
+      };
+      const timer = setTimeout(() => {
+        failBeforeConnect("gateway_connect_timeout");
       }, openClawGatewayConnectTimeoutMs);
 
       ws.addEventListener("message", (event) => {
@@ -578,22 +584,9 @@ class GatewayClient {
         }
 
         if (frame?.type === "event" && frame?.event === "connect.challenge") {
-          const nonce = typeof frame?.payload?.nonce === "string" ? frame.payload.nonce : undefined;
           const scopes = ["operator.admin"];
-          const signedAtMs = Date.now();
-          const payload = buildDeviceAuthPayload({
-            deviceId: this.identity.deviceId,
-            clientId: "gateway-client",
-            clientMode: "backend",
-            role: "operator",
-            scopes,
-            signedAtMs,
-            token: openClawGatewayToken || null,
-            nonce,
-          });
-          const signature = base64UrlEncode(
-            sign(null, Buffer.from(payload, "utf8"), createPrivateKey(this.identity.privateKeyPem)),
-          );
+          // OpenClaw gateway (v2026.3.x) accepts token-authenticated connect without device signature.
+          // Sending legacy device payload can trigger policy-close (1008) before hello-ok.
           ws.send(
             JSON.stringify({
               type: "req",
@@ -611,13 +604,6 @@ class GatewayClient {
                 role: "operator",
                 scopes,
                 auth: openClawGatewayToken ? { token: openClawGatewayToken } : undefined,
-                device: {
-                  id: this.identity.deviceId,
-                  publicKey: base64UrlEncode(derivePublicKeyRaw(this.identity.publicKeyPem)),
-                  signature,
-                  signedAt: signedAtMs,
-                  nonce,
-                },
               },
             }),
           );
@@ -626,6 +612,7 @@ class GatewayClient {
 
         if (!this.connected && frame?.type === "res" && frame?.ok && frame?.payload?.type === "hello-ok") {
           clearTimeout(timer);
+          connectSettled = true;
           this.connected = true;
           resolve();
           return;
@@ -652,16 +639,24 @@ class GatewayClient {
 
       ws.addEventListener("close", () => {
         clearTimeout(timer);
+        const wasConnected = this.connected;
         this.connected = false;
         for (const [, pending] of this.pending) {
           pending.reject(new Error("gateway socket closed"));
         }
         this.pending.clear();
+        if (!wasConnected) {
+          failBeforeConnect("gateway_socket_closed_before_connect");
+        }
       });
 
       ws.addEventListener("error", () => {
         clearTimeout(timer);
+        const wasConnected = this.connected;
         this.connected = false;
+        if (!wasConnected) {
+          failBeforeConnect("gateway_socket_error_before_connect");
+        }
       });
     });
   }
