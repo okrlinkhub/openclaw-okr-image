@@ -24,6 +24,11 @@ const openClawGatewayConnectTimeoutMs = Number(
 const openClawStateDir = process.env.OPENCLAW_STATE_DIR || "/data/.clawdbot";
 const openClawWorkspaceDir = process.env.OPENCLAW_WORKSPACE_DIR || "/data/workspace";
 const openClawAgentKey = process.env.OPENCLAW_AGENT_KEY || "default";
+const skillsBootstrapMode = process.env.SKILLS_BOOTSTRAP_MODE || "off";
+const skillsBootstrapRequired = parseBooleanEnv(process.env.SKILLS_BOOTSTRAP_REQUIRED, false);
+const skillsBootstrapTimeoutMs = Number(process.env.SKILLS_BOOTSTRAP_TIMEOUT_MS || 15000);
+const globalSkillsReleaseChannel = process.env.SKILLS_RELEASE_CHANNEL || "stable";
+const openClawSkillsDir = process.env.OPENCLAW_SKILLS_DIR || `${openClawStateDir}/skills`;
 
 if (!convexUrl) {
   console.error("[worker] FATAL: CONVEX_URL is required");
@@ -306,6 +311,14 @@ async function getLatestSnapshotForRestore() {
   });
 }
 
+async function getWorkerGlobalSkillsManifest() {
+  return convexCall("query", "agentFactory:workerGlobalSkillsManifest", {
+    workspaceId,
+    workerId,
+    releaseChannel: globalSkillsReleaseChannel,
+  });
+}
+
 async function attachMessageMetadata(messageId, metadata) {
   if (!metadata || Object.keys(metadata).length === 0) return;
   await convexCall("mutation", "agentFactory:workerAttachMessageMetadata", {
@@ -525,6 +538,155 @@ async function createAndUploadSnapshot(reason) {
   } finally {
     rmSync(archivePath, { force: true });
   }
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(`${label}_timeout_${timeoutMs}ms`)), timeoutMs);
+    }),
+  ]);
+}
+
+function toSafeSkillSlug(input) {
+  const normalized = String(input || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || "unnamed-skill";
+}
+
+function writeGlobalSkillFiles(skillDir, skill) {
+  const scriptsDir = `${skillDir}/scripts`;
+  mkdirSync(scriptsDir, { recursive: true });
+  const skillMd = [
+    "---",
+    `name: ${skill.slug}`,
+    `description: Global skill ${skill.slug}@${skill.version} provisioned by agent-factory.`,
+    "---",
+    "",
+    "# Global Skill",
+    "",
+    "This skill is generated automatically at worker bootstrap.",
+    "",
+    `- slug: ${skill.slug}`,
+    `- version: ${skill.version}`,
+    `- entryPoint: ${skill.entryPoint}`,
+    `- moduleFormat: ${skill.moduleFormat}`,
+    "",
+    "Do not edit manually.",
+    "",
+  ].join("\n");
+  writeFileSync(`${skillDir}/SKILL.md`, skillMd);
+  writeFileSync(`${skillDir}/scripts/index.mjs`, `${skill.sourceJs}\n`);
+  writeFileSync(
+    `${skillDir}/.af-global-skill.json`,
+    `${JSON.stringify(
+      {
+        slug: skill.slug,
+        version: skill.version,
+        sha256: skill.sha256,
+        managedBy: "agent-factory",
+        generatedAt: Date.now(),
+      },
+      null,
+      2,
+    )}\n`,
+  );
+}
+
+function cleanupRemovedManagedSkills(skillsRoot, nextSkillSlugs) {
+  let entries = [];
+  try {
+    entries = readdirSync(skillsRoot, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const candidateDir = `${skillsRoot}/${entry.name}`;
+    const markerPath = `${candidateDir}/.af-global-skill.json`;
+    if (!existsSync(markerPath)) continue;
+    if (nextSkillSlugs.has(entry.name)) continue;
+    rmSync(candidateDir, { recursive: true, force: true });
+  }
+}
+
+async function materializeGlobalSkillsFromManifest(manifest) {
+  const skills = Array.isArray(manifest?.skills) ? manifest.skills : [];
+  mkdirSync(openClawSkillsDir, { recursive: true });
+  const activeSkillSlugs = new Set();
+
+  for (const rawSkill of skills) {
+    const slug = toSafeSkillSlug(rawSkill?.slug);
+    const sourceJs = typeof rawSkill?.sourceJs === "string" ? rawSkill.sourceJs : "";
+    if (!sourceJs.trim()) {
+      console.warn(`[worker] skip global skill '${slug}': empty source`);
+      continue;
+    }
+    const expectedSha = typeof rawSkill?.sha256 === "string" ? rawSkill.sha256.trim() : "";
+    const sourceSha = createHash("sha256").update(sourceJs).digest("hex");
+    if (expectedSha && expectedSha !== sourceSha) {
+      throw new Error(`global skill checksum mismatch for ${slug}`);
+    }
+
+    const skill = {
+      slug,
+      version: String(rawSkill?.version || "0.0.0"),
+      entryPoint: String(rawSkill?.entryPoint || "default"),
+      moduleFormat: String(rawSkill?.moduleFormat || "esm"),
+      sourceJs,
+      sha256: expectedSha || sourceSha,
+    };
+    const skillDir = `${openClawSkillsDir}/${slug}`;
+    const hasUnmanagedDirectory = existsSync(skillDir) && !existsSync(`${skillDir}/.af-global-skill.json`);
+    if (hasUnmanagedDirectory) {
+      console.warn(`[worker] global skill '${slug}' skipped: unmanaged directory exists`);
+      continue;
+    }
+    writeGlobalSkillFiles(skillDir, skill);
+    activeSkillSlugs.add(slug);
+  }
+
+  cleanupRemovedManagedSkills(openClawSkillsDir, activeSkillSlugs);
+
+  const lockfile = {
+    manifestVersion: String(manifest?.manifestVersion || "unknown"),
+    generatedAt: Number(manifest?.generatedAt || Date.now()),
+    releaseChannel: String(manifest?.releaseChannel || globalSkillsReleaseChannel),
+    skillsDir: openClawSkillsDir,
+    skillsCount: activeSkillSlugs.size,
+    skills: [...activeSkillSlugs].sort(),
+    workspaceId,
+    workerId,
+  };
+  writeFileSync(`${openClawSkillsDir}/.skills.lock.json`, `${JSON.stringify(lockfile, null, 2)}\n`);
+  return lockfile;
+}
+
+async function bootstrapGlobalSkillsIfConfigured() {
+  if (skillsBootstrapMode !== "db_manifest") {
+    console.log(`[worker] Skills bootstrap skipped (mode=${skillsBootstrapMode})`);
+    return { skipped: true, reason: "mode_off" };
+  }
+  const manifest = await withTimeout(
+    getWorkerGlobalSkillsManifest(),
+    skillsBootstrapTimeoutMs,
+    "skills_manifest_fetch",
+  );
+  const lockfile = await withTimeout(
+    materializeGlobalSkillsFromManifest(manifest),
+    skillsBootstrapTimeoutMs,
+    "skills_materialization",
+  );
+  console.log(
+    `[worker] Global skills ready count=${lockfile.skillsCount} version=${lockfile.manifestVersion} dir=${openClawSkillsDir}`,
+  );
+  return { skipped: false, lockfile };
 }
 
 class GatewayClient {
@@ -795,8 +957,17 @@ async function processJob(job, hydration) {
 async function run() {
   console.log(`[worker] START workerId=${workerId}`);
   console.log(
-    `[worker] env CONVEX_URL=${convexUrl ? "SET" : "MISSING"} WORKSPACE_ID=${workspaceId} OPENCLAW_MVP_ENABLED=${openClawEnabled} OPENCLAW_GATEWAY_URL=${openClawGatewayUrl} OPENCLAW_AGENT_MODEL=${openClawAgentModel || "-"}`,
+    `[worker] env CONVEX_URL=${convexUrl ? "SET" : "MISSING"} WORKSPACE_ID=${workspaceId} OPENCLAW_MVP_ENABLED=${openClawEnabled} OPENCLAW_GATEWAY_URL=${openClawGatewayUrl} OPENCLAW_AGENT_MODEL=${openClawAgentModel || "-"} SKILLS_BOOTSTRAP_MODE=${skillsBootstrapMode} OPENCLAW_SKILLS_DIR=${openClawSkillsDir}`,
   );
+  try {
+    await bootstrapGlobalSkillsIfConfigured();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (skillsBootstrapRequired) {
+      throw new Error(`skills_bootstrap_required_failed: ${message}`);
+    }
+    console.warn(`[worker] Skills bootstrap fallback: ${message}`);
+  }
   try {
     await restoreSnapshotIfNeeded();
   } catch (error) {

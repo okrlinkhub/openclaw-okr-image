@@ -26,6 +26,7 @@ export OPENCLAW_GATEWAY_PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
 export OPENCLAW_GATEWAY_URL="${OPENCLAW_GATEWAY_URL:-http://${OPENCLAW_GATEWAY_HOST}:${OPENCLAW_GATEWAY_PORT}}"
 export OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-/data/.clawdbot}"
 export OPENCLAW_WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-/data/workspace}"
+export OPENCLAW_SKILLS_DIR="${OPENCLAW_SKILLS_DIR:-${OPENCLAW_STATE_DIR}/skills}"
 export OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-/data/.clawdbot/openclaw.json}"
 export OPENCLAW_REQUIRE_DATA_MOUNT="${OPENCLAW_REQUIRE_DATA_MOUNT:-true}"
 export OPENCLAW_SETUP_COMMAND="${OPENCLAW_SETUP_COMMAND:-node /app/openclaw.mjs --dev setup}"
@@ -67,10 +68,11 @@ if [ "${OPENCLAW_REQUIRE_DATA_MOUNT}" = "true" ]; then
   fi
 fi
 
-mkdir -p "${OPENCLAW_STATE_DIR}" "${OPENCLAW_WORKSPACE_DIR}" "$(dirname "${OPENCLAW_CONFIG_PATH}")"
+mkdir -p "${OPENCLAW_STATE_DIR}" "${OPENCLAW_WORKSPACE_DIR}" "${OPENCLAW_SKILLS_DIR}" "$(dirname "${OPENCLAW_CONFIG_PATH}")"
 echo "[entrypoint] OpenClaw state dir: ${OPENCLAW_STATE_DIR}"
 echo "[entrypoint] OpenClaw workspace dir: ${OPENCLAW_WORKSPACE_DIR}"
 echo "[entrypoint] OpenClaw config path: ${OPENCLAW_CONFIG_PATH}"
+echo "[entrypoint] OpenClaw skills dir: ${OPENCLAW_SKILLS_DIR}"
 
 mkdir -p \
   "${OPENCLAW_STATE_DIR}/agents/main/sessions" \
