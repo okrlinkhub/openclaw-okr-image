@@ -1,15 +1,15 @@
-FROM ghcr.io/openclaw/openclaw:latest@sha256:ace6f32961c4d574cb189d0007ec778408a9c02502f38af9ded6c864bae0f454
+FROM ghcr.io/openclaw/openclaw:main-slim-amd64@sha256:165568320ac3bb76c9b8da76ba9367e0cc4e6c06e7473e3db30ed2de415f027a
 
 USER root
 
 WORKDIR /app
 
-# Assicura runtime Node + curl per health check runtime.
+# Assicura runtime Node + tooling di diagnostica per health check/runtime debug.
 # Supporta sia immagini Alpine che Debian/Ubuntu.
 RUN if command -v apk >/dev/null 2>&1; then \
-      apk add --no-cache nodejs curl tar; \
+      apk add --no-cache nodejs curl tar procps iproute2 lsof; \
     elif command -v apt-get >/dev/null 2>&1; then \
-      apt-get update && apt-get install -y --no-install-recommends nodejs curl tar && rm -rf /var/lib/apt/lists/*; \
+      apt-get update && apt-get install -y --no-install-recommends nodejs curl tar procps iproute2 lsof && rm -rf /var/lib/apt/lists/*; \
     else \
       echo "Unsupported base image: cannot install nodejs"; \
       exit 1; \
@@ -20,9 +20,8 @@ RUN node --version
 
 RUN mkdir -p /data /app/skills
 
-COPY skills/ /app/skills/
-# Rende eseguibili eventuali script skills senza legarsi a una skill specifica.
-RUN find /app/skills -type f -path "*/scripts/*" -exec chmod +x {} +
+# This image currently ships without repo-local bundled skills.
+# Keep the directory present so runtime logic can still mount or hydrate skills.
 
 COPY worker.mjs /app/worker.mjs
 COPY entrypoint.sh /entrypoint.sh

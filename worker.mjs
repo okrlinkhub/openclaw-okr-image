@@ -24,6 +24,7 @@ const openClawGatewayConnectTimeoutMs = Number(
 const openClawStateDir = process.env.OPENCLAW_STATE_DIR || "/data/.clawdbot";
 const openClawWorkspaceDir = process.env.OPENCLAW_WORKSPACE_DIR || "/data/workspace";
 const openClawAgentKey = process.env.OPENCLAW_AGENT_KEY || "default";
+const convexComponentName = "agentFactory";
 
 if (!convexUrl) {
   console.error("[worker] FATAL: CONVEX_URL is required");
@@ -64,6 +65,10 @@ function parseBooleanEnv(value, defaultValue) {
 function isRetryableError(error) {
   const message = String(error?.message || error);
   return /timeout|network|429|5\d\d/i.test(message);
+}
+
+function convexComponentPath(functionName) {
+  return `${convexComponentName}:${functionName}`;
 }
 
 async function convexCall(kind, path, args) {
@@ -210,7 +215,11 @@ async function fetchTelegramFileBlob(botToken, fileId) {
 }
 
 async function uploadBlobToConvexStorage(buffer, contentType) {
-  const { uploadUrl } = await convexCall("mutation", "example:workerGenerateMediaUploadUrl", {});
+  const { uploadUrl } = await convexCall(
+    "mutation",
+    convexComponentPath("workerGenerateMediaUploadUrl"),
+    {},
+  );
   const uploadResp = await fetch(uploadUrl, {
     method: "POST",
     headers: { "Content-Type": contentType },
@@ -224,30 +233,30 @@ async function uploadBlobToConvexStorage(buffer, contentType) {
   if (!parsed.storageId) {
     throw new Error("Convex media upload missing storageId");
   }
-  const storageUrl = await convexCall("query", "example:workerGetStorageFileUrl", {
+  const storageUrl = await convexCall("query", convexComponentPath("workerGetStorageFileUrl"), {
     storageId: parsed.storageId,
   });
   return { storageId: parsed.storageId, storageUrl };
 }
 
 async function claimJob(conversationId) {
-  return convexCall("mutation", "example:workerClaim", { workerId, conversationId });
+  return convexCall("mutation", convexComponentPath("workerClaim"), { workerId, conversationId });
 }
 
 async function hasQueuedConversation(conversationId) {
-  return convexCall("query", "example:workerConversationHasQueued", { conversationId });
+  return convexCall("query", convexComponentPath("workerConversationHasQueued"), { conversationId });
 }
 
 async function heartbeat(messageId, leaseId) {
-  return convexCall("mutation", "example:workerHeartbeat", { workerId, messageId, leaseId });
+  return convexCall("mutation", convexComponentPath("workerHeartbeat"), { workerId, messageId, leaseId });
 }
 
 async function complete(messageId, leaseId) {
-  return convexCall("mutation", "example:workerComplete", { workerId, messageId, leaseId });
+  return convexCall("mutation", convexComponentPath("workerComplete"), { workerId, messageId, leaseId });
 }
 
 async function fail(messageId, leaseId, errorMessage) {
-  return convexCall("mutation", "example:workerFail", {
+  return convexCall("mutation", convexComponentPath("workerFail"), {
     workerId,
     messageId,
     leaseId,
@@ -256,11 +265,11 @@ async function fail(messageId, leaseId, errorMessage) {
 }
 
 async function loadHydration(messageId) {
-  return convexCall("query", "example:workerHydrationBundle", { messageId, workspaceId });
+  return convexCall("query", convexComponentPath("workerHydrationBundle"), { messageId, workspaceId });
 }
 
 async function appendConversationMessages(conversationId, messages) {
-  return convexCall("mutation", "example:workerAppendConversationMessages", {
+  return convexCall("mutation", convexComponentPath("workerAppendConversationMessages"), {
     conversationId,
     workspaceId,
     messages,
@@ -268,11 +277,11 @@ async function appendConversationMessages(conversationId, messages) {
 }
 
 async function getWorkerControlState() {
-  return convexCall("query", "example:workerControlState", { workerId });
+  return convexCall("query", convexComponentPath("workerControlState"), { workerId });
 }
 
 async function prepareSnapshotUpload({ reason, conversationId }) {
-  return convexCall("mutation", "example:workerPrepareSnapshotUpload", {
+  return convexCall("mutation", convexComponentPath("workerPrepareSnapshotUpload"), {
     workerId,
     workspaceId,
     agentKey: stickyAgentKey || openClawAgentKey,
@@ -282,7 +291,7 @@ async function prepareSnapshotUpload({ reason, conversationId }) {
 }
 
 async function finalizeSnapshotUpload(snapshotId, storageId, sha256, sizeBytes) {
-  return convexCall("mutation", "example:workerFinalizeSnapshotUpload", {
+  return convexCall("mutation", convexComponentPath("workerFinalizeSnapshotUpload"), {
     workerId,
     snapshotId,
     storageId,
@@ -292,7 +301,7 @@ async function finalizeSnapshotUpload(snapshotId, storageId, sha256, sizeBytes) 
 }
 
 async function failSnapshotUpload(snapshotId, error) {
-  return convexCall("mutation", "example:workerFailSnapshotUpload", {
+  return convexCall("mutation", convexComponentPath("workerFailSnapshotUpload"), {
     workerId,
     snapshotId,
     error,
@@ -300,7 +309,7 @@ async function failSnapshotUpload(snapshotId, error) {
 }
 
 async function getLatestSnapshotForRestore() {
-  return convexCall("query", "example:workerLatestSnapshotForRestore", {
+  return convexCall("query", convexComponentPath("workerLatestSnapshotForRestore"), {
     workspaceId,
     agentKey: stickyAgentKey || openClawAgentKey,
   });
@@ -308,7 +317,7 @@ async function getLatestSnapshotForRestore() {
 
 async function attachMessageMetadata(messageId, metadata) {
   if (!metadata || Object.keys(metadata).length === 0) return;
-  await convexCall("mutation", "example:workerAttachMessageMetadata", {
+  await convexCall("mutation", convexComponentPath("workerAttachMessageMetadata"), {
     messageId,
     metadata,
   });
@@ -584,7 +593,7 @@ class GatewayClient {
         }
 
         if (frame?.type === "event" && frame?.event === "connect.challenge") {
-          const scopes = ["operator.admin"];
+          const scopes = ["operator.admin", "operator.read", "operator.write"];
           // OpenClaw gateway (v2026.3.x) accepts token-authenticated connect without device signature.
           // Sending legacy device payload can trigger policy-close (1008) before hello-ok.
           ws.send(
