@@ -24,7 +24,7 @@ const openClawGatewayConnectTimeoutMs = Number(
 const openClawStateDir = process.env.OPENCLAW_STATE_DIR || "/data/.clawdbot";
 const openClawWorkspaceDir = process.env.OPENCLAW_WORKSPACE_DIR || "/data/workspace";
 const openClawAgentKey = process.env.OPENCLAW_AGENT_KEY || "default";
-const convexComponentName = "agentFactory";
+const convexComponentName = process.env.AGENT_FACTORY_FUNCTION_NAMESPACE || "agentFactory";
 
 if (!convexUrl) {
   console.error("[worker] FATAL: CONVEX_URL is required");

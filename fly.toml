@@ -1,4 +1,4 @@
-app = "agent-factory-workers"
+app = "innovation-sax"
 primary_region = "iad"
 
 [build]
@@ -19,6 +19,7 @@ primary_region = "iad"
   OPENCLAW_GATEWAY_READY_TIMEOUT_MS = "60000"
   OPENCLAW_GATEWAY_READY_POLL_MS = "500"
   OPENCLAW_GATEWAY_READY_REQUIRED = "true"
+  AGENT_FACTORY_FUNCTION_NAMESPACE = "agentFactory"
   OPENCLAW_GATEWAY_PROBE_PATH = "/health"
   OPENCLAW_GATEWAY_DIAGNOSTIC_TAIL_LINES = "200"
 
