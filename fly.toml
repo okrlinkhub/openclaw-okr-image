@@ -6,6 +6,7 @@ primary_region = "iad"
 
 [env]
   NODE_ENV = "production"
+  WORKER_IDLE_TIMEOUT_MS = "1800000"
   OPENCLAW_GATEWAY_HOST = "127.0.0.1"
   OPENCLAW_GATEWAY_PORT = "18789"
   OPENCLAW_GATEWAY_URL = "http://127.0.0.1:18789"
@@ -22,6 +23,8 @@ primary_region = "iad"
   AGENT_FACTORY_FUNCTION_NAMESPACE = "agentFactory"
   OPENCLAW_GATEWAY_PROBE_PATH = "/health"
   OPENCLAW_GATEWAY_DIAGNOSTIC_TAIL_LINES = "200"
+  OPENCLAW_GATEWAY_VERBOSE = "false"
+  OPENCLAW_GATEWAY_STREAM_LOGS = "false"
 
 [[mounts]]
   source = "openclaw_data"

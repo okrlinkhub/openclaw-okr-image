@@ -22,13 +22,23 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
+is_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 resolve_gateway_command() {
   local legacy_node="/app/openclaw.mjs gateway"
   local legacy_wrapper="node /app/openclaw.mjs gateway"
   local configured="${OPENCLAW_GATEWAY_COMMAND:-}"
 
   if [ -z "${configured}" ] || [ "${configured}" = "${legacy_node}" ] || [ "${configured}" = "${legacy_wrapper}" ]; then
-    printf 'node /app/openclaw.mjs gateway --port %s --verbose' "${OPENCLAW_GATEWAY_PORT}"
+    printf 'node /app/openclaw.mjs gateway --port %s' "${OPENCLAW_GATEWAY_PORT}"
+    if is_truthy "${OPENCLAW_GATEWAY_VERBOSE:-false}"; then
+      printf ' --verbose'
+    fi
     return
   fi
 
@@ -55,6 +65,8 @@ print_env_presence() {
     OPENCLAW_GATEWAY_HOST
     OPENCLAW_GATEWAY_PORT
     OPENCLAW_GATEWAY_URL
+    OPENCLAW_GATEWAY_VERBOSE
+    OPENCLAW_GATEWAY_STREAM_LOGS
     OPENCLAW_SERVICE_ID
     OPENCLAW_SERVICE_KEY
     WORKER_ID
@@ -194,6 +206,8 @@ export OPENCLAW_GATEWAY_READY_POLL_MS="${OPENCLAW_GATEWAY_READY_POLL_MS:-500}"
 export OPENCLAW_GATEWAY_TOKEN="${OPENCLAW_GATEWAY_TOKEN:-}"
 export OPENCLAW_GATEWAY_READY_REQUIRED="${OPENCLAW_GATEWAY_READY_REQUIRED:-true}"
 export OPENCLAW_AGENT_MODEL="${OPENCLAW_AGENT_MODEL:-}"
+export OPENCLAW_GATEWAY_VERBOSE="${OPENCLAW_GATEWAY_VERBOSE:-false}"
+export OPENCLAW_GATEWAY_STREAM_LOGS="${OPENCLAW_GATEWAY_STREAM_LOGS:-false}"
 export OPENCLAW_DIAGNOSTICS_DIR="${OPENCLAW_DIAGNOSTICS_DIR:-${OPENCLAW_STATE_DIR}/logs}"
 export OPENCLAW_GATEWAY_LOG_PATH="${OPENCLAW_GATEWAY_LOG_PATH:-${OPENCLAW_DIAGNOSTICS_DIR}/gateway-startup.log}"
 export OPENCLAW_GATEWAY_DIAGNOSTIC_TAIL_LINES="${OPENCLAW_GATEWAY_DIAGNOSTIC_TAIL_LINES:-200}"
@@ -416,15 +430,20 @@ fi
 
 rm -f "${OPENCLAW_GATEWAY_LOG_PATH}"
 touch "${OPENCLAW_GATEWAY_LOG_PATH}"
-gateway_log_pipe="${OPENCLAW_DIAGNOSTICS_DIR}/gateway-startup.pipe"
-rm -f "${gateway_log_pipe}"
-mkfifo "${gateway_log_pipe}"
-tee -a "${OPENCLAW_GATEWAY_LOG_PATH}" <"${gateway_log_pipe}" &
-gateway_log_tee_pid="$!"
-
 log "Starting OpenClaw gateway: ${OPENCLAW_GATEWAY_COMMAND}"
 log "gateway node=$(which node 2>&1)"
-sh -lc "exec ${OPENCLAW_GATEWAY_COMMAND}" >"${gateway_log_pipe}" 2>&1 &
+if is_truthy "${OPENCLAW_GATEWAY_STREAM_LOGS}"; then
+  gateway_log_pipe="${OPENCLAW_DIAGNOSTICS_DIR}/gateway-startup.pipe"
+  rm -f "${gateway_log_pipe}"
+  mkfifo "${gateway_log_pipe}"
+  tee -a "${OPENCLAW_GATEWAY_LOG_PATH}" <"${gateway_log_pipe}" &
+  gateway_log_tee_pid="$!"
+  log "Gateway logs are streamed to stdout and saved to ${OPENCLAW_GATEWAY_LOG_PATH}"
+  sh -lc "exec ${OPENCLAW_GATEWAY_COMMAND}" >"${gateway_log_pipe}" 2>&1 &
+else
+  log "Gateway logs are saved to ${OPENCLAW_GATEWAY_LOG_PATH} (stdout streaming disabled)"
+  sh -lc "exec ${OPENCLAW_GATEWAY_COMMAND}" >>"${OPENCLAW_GATEWAY_LOG_PATH}" 2>&1 &
+fi
 gateway_pid="$!"
 log "Gateway PID: ${gateway_pid}"
 

@@ -7,7 +7,7 @@ import { basename, dirname, extname } from "node:path";
 
 const convexUrl = process.env.CONVEX_URL;
 const workerId = process.env.WORKER_ID || `afw-${Date.now()}`;
-const idleTimeoutMs = Number(process.env.WORKER_IDLE_TIMEOUT_MS || 300000);
+const idleTimeoutMs = Number(process.env.WORKER_IDLE_TIMEOUT_MS || 1800000);
 const pollMs = Number(process.env.POLL_INTERVAL_MS || 2000);
 const heartbeatIntervalMs = Number(process.env.HEARTBEAT_INTERVAL_MS || 10000);
 const requestTimeoutMs = Number(process.env.CONVEX_HTTP_TIMEOUT_MS || 20000);
