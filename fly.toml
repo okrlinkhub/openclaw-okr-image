@@ -1,6 +1,7 @@
-app = "innovation-sax"
+app = "agent-factory-workers-linkhub-w4"
 primary_region = "iad"
 
+# Deploy with: fly deploy --remote-only --depot=false --yes
 [build]
   dockerfile = "Dockerfile"
 
