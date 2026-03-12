@@ -61,6 +61,7 @@ print_env_presence() {
     MOONSHOT_API_KEY
     OPENAI_API_KEY
     OPENCLAW_AGENT_MODEL
+    OPENCLAW_SKILLS_DIR
     OPENCLAW_GATEWAY_COMMAND
     OPENCLAW_GATEWAY_HOST
     OPENCLAW_GATEWAY_PORT
@@ -69,6 +70,10 @@ print_env_presence() {
     OPENCLAW_GATEWAY_STREAM_LOGS
     OPENCLAW_SERVICE_ID
     OPENCLAW_SERVICE_KEY
+    SKILLS_BOOTSTRAP_MODE
+    SKILLS_BOOTSTRAP_REQUIRED
+    SKILLS_BOOTSTRAP_TIMEOUT_MS
+    SKILLS_RELEASE_CHANNEL
     WORKER_ID
     WORKER_IDLE_TIMEOUT_MS
   )
@@ -188,6 +193,10 @@ if [ ! -f "/app/openclaw.mjs" ]; then
   fatal "/app/openclaw.mjs not found"
 fi
 
+if [ ! -f "/app/bootstrap.mjs" ]; then
+  fatal "/app/bootstrap.mjs not found"
+fi
+
 export WORKER_ID="${WORKER_ID:-$(cat /proc/sys/kernel/random/uuid)}"
 log "Worker ID: ${WORKER_ID}"
 
@@ -206,6 +215,11 @@ export OPENCLAW_GATEWAY_READY_POLL_MS="${OPENCLAW_GATEWAY_READY_POLL_MS:-500}"
 export OPENCLAW_GATEWAY_TOKEN="${OPENCLAW_GATEWAY_TOKEN:-}"
 export OPENCLAW_GATEWAY_READY_REQUIRED="${OPENCLAW_GATEWAY_READY_REQUIRED:-true}"
 export OPENCLAW_AGENT_MODEL="${OPENCLAW_AGENT_MODEL:-}"
+export SKILLS_BOOTSTRAP_MODE="${SKILLS_BOOTSTRAP_MODE:-db_manifest}"
+export SKILLS_BOOTSTRAP_REQUIRED="${SKILLS_BOOTSTRAP_REQUIRED:-false}"
+export SKILLS_BOOTSTRAP_TIMEOUT_MS="${SKILLS_BOOTSTRAP_TIMEOUT_MS:-15000}"
+export SKILLS_RELEASE_CHANNEL="${SKILLS_RELEASE_CHANNEL:-stable}"
+export OPENCLAW_SKILLS_DIR="${OPENCLAW_SKILLS_DIR:-${OPENCLAW_WORKSPACE_DIR}/skills}"
 export OPENCLAW_GATEWAY_VERBOSE="${OPENCLAW_GATEWAY_VERBOSE:-false}"
 export OPENCLAW_GATEWAY_STREAM_LOGS="${OPENCLAW_GATEWAY_STREAM_LOGS:-false}"
 export OPENCLAW_DIAGNOSTICS_DIR="${OPENCLAW_DIAGNOSTICS_DIR:-${OPENCLAW_STATE_DIR}/logs}"
@@ -256,6 +270,7 @@ fi
 mkdir -p "${OPENCLAW_STATE_DIR}" "${OPENCLAW_WORKSPACE_DIR}" "$(dirname "${OPENCLAW_CONFIG_PATH}")" "${OPENCLAW_DIAGNOSTICS_DIR}"
 log "OpenClaw state dir: ${OPENCLAW_STATE_DIR}"
 log "OpenClaw workspace dir: ${OPENCLAW_WORKSPACE_DIR}"
+log "OpenClaw skills dir: ${OPENCLAW_SKILLS_DIR}"
 log "OpenClaw config path: ${OPENCLAW_CONFIG_PATH}"
 log "OpenClaw diagnostics dir: ${OPENCLAW_DIAGNOSTICS_DIR}"
 print_env_presence
@@ -426,6 +441,11 @@ if [ "${OPENCLAW_RUN_SETUP}" = "true" ]; then
   fi
 else
   log "OPENCLAW_RUN_SETUP=false, skipping interactive setup"
+fi
+
+log "Running bootstrap prestart"
+if ! node /app/bootstrap.mjs; then
+  fatal "Bootstrap prestart failed"
 fi
 
 rm -f "${OPENCLAW_GATEWAY_LOG_PATH}"

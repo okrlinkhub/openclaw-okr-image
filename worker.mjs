@@ -801,11 +801,6 @@ async function run() {
   console.log(
     `[worker] env CONVEX_URL=${convexUrl ? "SET" : "MISSING"} WORKSPACE_ID=${workspaceId} OPENCLAW_MVP_ENABLED=${openClawEnabled} OPENCLAW_GATEWAY_URL=${openClawGatewayUrl} OPENCLAW_AGENT_MODEL=${openClawAgentModel || "-"}`,
   );
-  try {
-    await restoreSnapshotIfNeeded();
-  } catch (error) {
-    console.error(`[worker] restore failed: ${error instanceof Error ? error.message : String(error)}`);
-  }
   while (!shuttingDown) {
     try {
       const control = await getWorkerControlState();

@@ -1,4 +1,4 @@
-app = "agent-factory-workers-linkhub-w4"
+app = "innovation-sax"
 primary_region = "iad"
 
 [build]
@@ -21,6 +21,11 @@ primary_region = "iad"
   OPENCLAW_GATEWAY_READY_POLL_MS = "500"
   OPENCLAW_GATEWAY_READY_REQUIRED = "true"
   AGENT_FACTORY_FUNCTION_NAMESPACE = "agentFactory"
+  SKILLS_BOOTSTRAP_MODE = "db_manifest"
+  SKILLS_BOOTSTRAP_REQUIRED = "false"
+  SKILLS_BOOTSTRAP_TIMEOUT_MS = "15000"
+  SKILLS_RELEASE_CHANNEL = "stable"
+  OPENCLAW_SKILLS_DIR = "/data/workspace/skills"
   OPENCLAW_GATEWAY_PROBE_PATH = "/health"
   OPENCLAW_GATEWAY_DIAGNOSTIC_TAIL_LINES = "200"
   OPENCLAW_GATEWAY_VERBOSE = "false"

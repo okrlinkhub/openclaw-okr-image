@@ -20,9 +20,10 @@ RUN node --version
 
 RUN mkdir -p /data /app/skills
 
-# This image currently ships without repo-local bundled skills.
-# Keep the directory present so runtime logic can still mount or hydrate skills.
+# Global skills are hydrated into /data at prestart from the agent-factory manifest.
+# Keep the directory present so the gateway can scan workspace skills deterministically.
 
+COPY bootstrap.mjs /app/bootstrap.mjs
 COPY worker.mjs /app/worker.mjs
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
@@ -39,6 +40,11 @@ ENV OPENCLAW_GATEWAY_HOST=127.0.0.1 \
     OPENCLAW_GATEWAY_COMMAND="node /app/openclaw.mjs gateway" \
     OPENCLAW_GATEWAY_READY_TIMEOUT_MS=60000 \
     OPENCLAW_GATEWAY_READY_POLL_MS=500 \
-    OPENCLAW_GATEWAY_READY_REQUIRED=true
+    OPENCLAW_GATEWAY_READY_REQUIRED=true \
+    SKILLS_BOOTSTRAP_MODE=db_manifest \
+    SKILLS_BOOTSTRAP_REQUIRED=false \
+    SKILLS_BOOTSTRAP_TIMEOUT_MS=15000 \
+    SKILLS_RELEASE_CHANNEL=stable \
+    OPENCLAW_SKILLS_DIR=/data/workspace/skills
 
 ENTRYPOINT ["/entrypoint.sh"]
