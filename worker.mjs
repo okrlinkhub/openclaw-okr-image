@@ -16,13 +16,14 @@ const openClawEnabled = parseBooleanEnv(process.env.OPENCLAW_MVP_ENABLED, true);
 const openClawTimeoutMs = Number(process.env.OPENCLAW_TIMEOUT_MS || 120000);
 const openClawThinking = process.env.OPENCLAW_THINKING || "medium";
 const openClawGatewayUrl = process.env.OPENCLAW_GATEWAY_URL || "http://127.0.0.1:18789";
-const openClawGatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN || "";
 const openClawAgentModel = process.env.OPENCLAW_AGENT_MODEL || "";
 const openClawGatewayConnectTimeoutMs = Number(
   process.env.OPENCLAW_GATEWAY_CONNECT_TIMEOUT_MS || 60000,
 );
 const openClawStateDir = process.env.OPENCLAW_STATE_DIR || "/data/.clawdbot";
 const openClawWorkspaceDir = process.env.OPENCLAW_WORKSPACE_DIR || "/data/workspace";
+const openClawConfigPath = process.env.OPENCLAW_CONFIG_PATH || `${openClawStateDir}/openclaw.json`;
+const openClawGatewayToken = resolveGatewayToken();
 const openClawAgentKey = process.env.OPENCLAW_AGENT_KEY || "default";
 const convexComponentName = process.env.AGENT_FACTORY_FUNCTION_NAMESPACE || "agentFactory";
 
@@ -41,14 +42,20 @@ let lastActivityAt = Date.now();
 let stickyConversationId = null;
 let stickyAgentKey = openClawAgentKey;
 let snapshotCreatedForShutdown = false;
+let controlCheckCount = 0;
+let emptyPollCount = 0;
+
+function formatRuntimeState() {
+  return `workerId=${workerId} shuttingDown=${shuttingDown} shutdownReason=${shutdownReason ?? "none"} stickyConversationId=${stickyConversationId ?? "none"} stickyAgentKey=${stickyAgentKey ?? "none"} lastActivityAt=${lastActivityAt}`;
+}
 
 process.on("SIGTERM", () => {
-  console.log("[worker] SIGTERM received");
+  console.warn(`[worker] SIGTERM received ${formatRuntimeState()}`);
   shuttingDown = true;
   shutdownReason = "signal";
 });
 process.on("SIGINT", () => {
-  console.log("[worker] SIGINT received");
+  console.warn(`[worker] SIGINT received ${formatRuntimeState()}`);
   shuttingDown = true;
   shutdownReason = "signal";
 });
@@ -60,6 +67,20 @@ function sleep(ms) {
 function parseBooleanEnv(value, defaultValue) {
   if (value == null) return defaultValue;
   return /^(1|true|yes|on)$/i.test(String(value).trim());
+}
+
+function resolveGatewayToken() {
+  try {
+    const raw = readFileSync(openClawConfigPath, "utf8");
+    const parsed = JSON.parse(raw);
+    const configToken = parsed?.gateway?.auth?.token;
+    if (typeof configToken === "string" && configToken.trim()) {
+      return configToken.trim();
+    }
+  } catch {
+    // fall through to env fallback
+  }
+  return String(process.env.OPENCLAW_GATEWAY_TOKEN || "").trim();
 }
 
 function isRetryableError(error) {
@@ -803,8 +824,12 @@ async function run() {
   );
   while (!shuttingDown) {
     try {
+      controlCheckCount += 1;
       const control = await getWorkerControlState();
       if (control.shouldStop) {
+        console.warn(
+          `[worker] control requested shutdown on check #${controlCheckCount} ${formatRuntimeState()}`,
+        );
         shutdownReason = "signal";
         shuttingDown = true;
         continue;
@@ -816,6 +841,12 @@ async function run() {
       }
       const job = await claimJob(stickyConversationId ?? undefined);
       if (!job) {
+        emptyPollCount += 1;
+        if (emptyPollCount % 30 === 0) {
+          console.log(
+            `[worker] no job available poll=${emptyPollCount} controlChecks=${controlCheckCount} ${formatRuntimeState()}`,
+          );
+        }
         if (stickyConversationId) {
           const hasQueued = await hasQueuedConversation(stickyConversationId);
           if (hasQueued) lastActivityAt = Date.now();
@@ -823,6 +854,7 @@ async function run() {
         await sleep(pollMs);
         continue;
       }
+      emptyPollCount = 0;
       if (!stickyConversationId) {
         stickyConversationId = job.conversationId;
         stickyAgentKey = job.agentKey || stickyAgentKey;
@@ -859,6 +891,9 @@ async function run() {
   }
   if (!snapshotCreatedForShutdown) {
     try {
+      console.log(
+        `[worker] preparing shutdown snapshot reason=${shutdownReason === "signal" ? "signal" : "manual"} ${formatRuntimeState()}`,
+      );
       await createAndUploadSnapshot(shutdownReason === "signal" ? "signal" : "manual");
     } catch (error) {
       console.error(
@@ -866,7 +901,7 @@ async function run() {
       );
     }
   }
-  console.log("[worker] Exit clean");
+  console.log(`[worker] Exit clean ${formatRuntimeState()} controlChecks=${controlCheckCount}`);
   process.exit(0);
 }
 

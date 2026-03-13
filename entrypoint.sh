@@ -448,6 +448,25 @@ if ! node /app/bootstrap.mjs; then
   fatal "Bootstrap prestart failed"
 fi
 
+resolved_gateway_token="$(node -e "
+  const fs = require('fs');
+  try {
+    const config = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+    const token = typeof config?.gateway?.auth?.token === 'string'
+      ? config.gateway.auth.token.trim()
+      : '';
+    process.stdout.write(token);
+  } catch {
+    process.stdout.write('');
+  }
+" "${OPENCLAW_CONFIG_PATH}")"
+if [ -n "${resolved_gateway_token}" ]; then
+  export OPENCLAW_GATEWAY_TOKEN="${resolved_gateway_token}"
+  log "Synchronized gateway token from ${OPENCLAW_CONFIG_PATH}"
+else
+  warn "Unable to resolve gateway token from ${OPENCLAW_CONFIG_PATH} after bootstrap"
+fi
+
 rm -f "${OPENCLAW_GATEWAY_LOG_PATH}"
 touch "${OPENCLAW_GATEWAY_LOG_PATH}"
 log "Starting OpenClaw gateway: ${OPENCLAW_GATEWAY_COMMAND}"
