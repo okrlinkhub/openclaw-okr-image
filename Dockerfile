@@ -4,12 +4,12 @@ USER root
 
 WORKDIR /app
 
-# Assicura runtime Node + tooling di diagnostica per health check/runtime debug.
+# Assicura runtime Node, CA bundle e tooling di diagnostica per health check/runtime debug.
 # Supporta sia immagini Alpine che Debian/Ubuntu.
 RUN if command -v apk >/dev/null 2>&1; then \
-      apk add --no-cache nodejs curl tar procps iproute2 lsof; \
+      apk add --no-cache ca-certificates nodejs curl tar procps iproute2 lsof; \
     elif command -v apt-get >/dev/null 2>&1; then \
-      apt-get update && apt-get install -y --no-install-recommends nodejs curl tar procps iproute2 lsof && rm -rf /var/lib/apt/lists/*; \
+      apt-get update && apt-get install -y --no-install-recommends ca-certificates nodejs curl tar procps iproute2 lsof && rm -rf /var/lib/apt/lists/*; \
     else \
       echo "Unsupported base image: cannot install nodejs"; \
       exit 1; \
