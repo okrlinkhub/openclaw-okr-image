@@ -344,7 +344,110 @@ async function attachMessageMetadata(messageId, metadata) {
   });
 }
 
+function sanitizeAttachmentFileName(fileName, fallbackBaseName) {
+  const rawName = typeof fileName === "string" ? fileName.trim() : "";
+  const sanitized = rawName
+    .replaceAll("\\", "-")
+    .replaceAll("/", "-")
+    .replace(/[^\w.-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return sanitized || fallbackBaseName;
+}
+
+function extensionFromMimeType(mimeType) {
+  const normalized = typeof mimeType === "string" ? mimeType.toLowerCase().trim() : "";
+  if (!normalized) return "";
+  const mimeToExt = {
+    "application/pdf": ".pdf",
+    "audio/mpeg": ".mp3",
+    "audio/mp4": ".m4a",
+    "audio/ogg": ".ogg",
+    "audio/wav": ".wav",
+    "audio/webm": ".webm",
+    "image/gif": ".gif",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "text/csv": ".csv",
+    "text/markdown": ".md",
+    "text/plain": ".txt",
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+  };
+  return mimeToExt[normalized] || "";
+}
+
+function resolveAttachmentFileName(attachment, index) {
+  const baseName = sanitizeAttachmentFileName(
+    attachment?.fileName,
+    `${attachment?.kind || "attachment"}-${index + 1}`,
+  );
+  if (extname(baseName)) return baseName;
+  const extension = extensionFromMimeType(attachment?.mimeType);
+  return extension ? `${baseName}${extension}` : baseName;
+}
+
+async function writeHydratedAttachmentToWorkspace(messageId, attachment, index) {
+  const downloadUrl = typeof attachment?.downloadUrl === "string" ? attachment.downloadUrl : "";
+  if (!downloadUrl) return null;
+
+  const fileName = resolveAttachmentFileName(attachment, index);
+  const attachmentsDir = `${openClawWorkspaceDir}/.telegram-attachments/${messageId}`;
+  const filePath = `${attachmentsDir}/${fileName}`;
+  mkdirSync(attachmentsDir, { recursive: true });
+
+  const response = await fetch(downloadUrl);
+  if (!response.ok) {
+    throw new Error(`Attachment download failed [${response.status}]`);
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  writeFileSync(filePath, buffer);
+  return { filePath, fileName, sizeBytes: buffer.length };
+}
+
 async function materializeTelegramMedia(job, hydration) {
+  const hydratedAttachments = Array.isArray(hydration?.payload?.attachments)
+    ? hydration.payload.attachments.filter(
+        (attachment) =>
+          attachment &&
+          attachment.status === "ready" &&
+          typeof attachment.downloadUrl === "string" &&
+          attachment.downloadUrl.length > 0,
+      )
+    : [];
+  if (hydratedAttachments.length > 0) {
+    const lines = [];
+    const nextMetadata = {};
+    for (const [index, attachment] of hydratedAttachments.entries()) {
+      try {
+        const materialized = await writeHydratedAttachmentToWorkspace(job.messageId, attachment, index);
+        if (!materialized) continue;
+        const label = attachment.kind === "voice" ? "audio (voice)" : attachment.kind || "attachment";
+        const details = [
+          materialized.filePath,
+          attachment.fileName ? `filename=${attachment.fileName}` : null,
+          attachment.mimeType ? `mime=${attachment.mimeType}` : null,
+          typeof attachment.downloadUrl === "string" ? `url=${attachment.downloadUrl}` : null,
+        ]
+          .filter(Boolean)
+          .join(" | ");
+        lines.push(`- ${label}: ${details}`);
+        if (typeof attachment.storageId === "string" && attachment.storageId.length > 0) {
+          nextMetadata[`convexAttachmentStorageId${index + 1}`] = attachment.storageId;
+        }
+        nextMetadata[`convexAttachmentPath${index + 1}`] = materialized.filePath;
+      } catch (error) {
+        console.error(
+          `[worker] hydrated attachment materialization failed (${attachment?.kind || "attachment"}): ${error?.message || error}`,
+        );
+      }
+    }
+    return { lines, metadata: nextMetadata };
+  }
+
   const metadata = job?.payload?.metadata || {};
   const botToken = hydration?.telegramBotToken;
   if (!botToken) return { lines: [], metadata: {} };
@@ -384,6 +487,8 @@ function buildOpenClawPrompt(job, hydration) {
     .join("\n");
   return [
     "You are OpenClaw runtime for a multi-tenant worker.",
+    "If the user message includes a [telegram_media] section, inspect every referenced local file path before answering.",
+    "Treat document attachments as primary source material and use filenames, MIME types, and linked files to answer accurately.",
     historyText ? `\n[ConversationHistory]\n${historyText}` : "",
     `\n[UserMessage]\n${incomingText}`,
     "\nReturn only the assistant reply text.",

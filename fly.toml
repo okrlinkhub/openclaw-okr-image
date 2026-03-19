@@ -1,4 +1,4 @@
-app = "agent-factory-workers-linkhub-w4"
+app = "innovation-sax"
 primary_region = "iad"
 
 # Deploy with: fly deploy --remote-only --depot=false --yes
