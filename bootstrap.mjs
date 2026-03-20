@@ -209,68 +209,12 @@ function normalizeRelativePath(value) {
   return normalized;
 }
 
-function buildLegacySkillFiles(rawSkill, slug) {
-  const version = String(rawSkill?.version || "0.0.0");
-  const entryPoint = String(rawSkill?.entryPoint || "default");
-  const moduleFormat = String(rawSkill?.moduleFormat || "esm");
-  const sourceJs = typeof rawSkill?.sourceJs === "string" ? rawSkill.sourceJs : "";
-  const skillMd = [
-    "---",
-    `name: ${slug}`,
-    `description: Global skill ${slug}@${version} provisioned by agent-factory.`,
-    "---",
-    "",
-    "# Global Skill",
-    "",
-    "This skill is generated automatically at worker bootstrap.",
-    "",
-    `- slug: ${slug}`,
-    `- version: ${version}`,
-    `- entryPoint: ${entryPoint}`,
-    `- moduleFormat: ${moduleFormat}`,
-    "",
-    "Do not edit manually.",
-    "",
-  ].join("\n");
-  const markerJson = `${JSON.stringify(
-    {
-      slug,
-      version,
-      sha256: String(rawSkill?.sha256 || sha256Hex(sourceJs)),
-      managedBy: "agent-factory",
-      entryPoint,
-      moduleFormat,
-      generatedAt: Date.now(),
-    },
-    null,
-    2,
-  )}\n`;
-  const scriptExt = moduleFormat === "cjs" ? "cjs" : "mjs";
-  return [
-    {
-      path: "SKILL.md",
-      content: `${skillMd}\n`,
-      sha256: sha256Hex(`${skillMd}\n`),
-    },
-    {
-      path: `scripts/index.${scriptExt}`,
-      content: `${sourceJs.trimEnd()}\n`,
-      sha256: sha256Hex(`${sourceJs.trimEnd()}\n`),
-    },
-    {
-      path: ".af-global-skill.json",
-      content: markerJson,
-      sha256: sha256Hex(markerJson),
-    },
-  ];
-}
-
 function getMaterializedFiles(rawSkill, slug) {
   const provided = Array.isArray(rawSkill?.files) ? rawSkill.files : [];
   if (provided.length === 0) {
-    return buildLegacySkillFiles(rawSkill, slug);
+    throw new Error(`global skill '${slug}' has no files bundle`);
   }
-  return provided.map((file) => {
+  const files = provided.map((file) => {
     const path = normalizeRelativePath(file?.path);
     const content = typeof file?.content === "string" ? file.content : "";
     const sha256 = typeof file?.sha256 === "string" && file.sha256.trim() ? file.sha256.trim() : sha256Hex(content);
@@ -279,6 +223,18 @@ function getMaterializedFiles(rawSkill, slug) {
     }
     return { path, content, sha256 };
   });
+  if (new Set(files.map((file) => file.path)).size !== files.length) {
+    throw new Error(`global skill '${slug}' contains duplicate file paths`);
+  }
+  const byPath = new Set(files.map((file) => file.path));
+  const scriptExt = String(rawSkill?.moduleFormat || "esm") === "cjs" ? "cjs" : "mjs";
+  const requiredPaths = ["SKILL.md", `scripts/index.${scriptExt}`, ".af-global-skill.json"];
+  for (const requiredPath of requiredPaths) {
+    if (!byPath.has(requiredPath)) {
+      throw new Error(`global skill '${slug}' missing required file '${requiredPath}'`);
+    }
+  }
+  return files;
 }
 
 function writeFileWithParents(filePath, content) {
@@ -338,16 +294,6 @@ async function materializeGlobalSkillsFromManifest(manifest) {
 
   for (const rawSkill of skills) {
     const slug = toSafeSkillSlug(rawSkill?.skillDirName || rawSkill?.slug);
-    const sourceJs = typeof rawSkill?.sourceJs === "string" ? rawSkill.sourceJs : "";
-    if (!sourceJs.trim()) {
-      warn(`skip global skill '${slug}': empty source`);
-      continue;
-    }
-    const expectedSha = typeof rawSkill?.sha256 === "string" ? rawSkill.sha256.trim() : "";
-    const sourceSha = sha256Hex(sourceJs);
-    if (expectedSha && expectedSha !== sourceSha) {
-      throw new Error(`global skill checksum mismatch for ${slug}`);
-    }
     const skillDir = `${openClawSkillsDir}/${slug}`;
     const hasUnmanagedDirectory = existsSync(skillDir) && !existsSync(`${skillDir}/.af-global-skill.json`);
     if (hasUnmanagedDirectory) {
@@ -356,6 +302,16 @@ async function materializeGlobalSkillsFromManifest(manifest) {
     }
 
     const files = getMaterializedFiles(rawSkill, slug);
+    const expectedSha = typeof rawSkill?.sha256 === "string" ? rawSkill.sha256.trim() : "";
+    const bundleSha = sha256Hex(
+      files
+        .filter((file) => file.path !== ".af-global-skill.json")
+        .map((file) => `${file.path}\n${file.sha256}\n${file.content}`)
+        .join("\n---\n"),
+    );
+    if (expectedSha && expectedSha !== bundleSha) {
+      throw new Error(`global skill bundle checksum mismatch for ${slug}`);
+    }
     replaceManagedSkillDir(skillDir, files);
     activeSkillSlugs.add(slug);
   }
