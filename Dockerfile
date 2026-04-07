@@ -1,4 +1,4 @@
-FROM ghcr.io/openclaw/openclaw:main-slim-amd64@sha256:165568320ac3bb76c9b8da76ba9367e0cc4e6c06e7473e3db30ed2de415f027a
+FROM ghcr.io/openclaw/openclaw:2026.4.5-slim-amd64@sha256:9212352005b81866b5a365d41122f986b23746eba9b22b21b853bd7f6b646967
 
 USER root
 
