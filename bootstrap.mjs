@@ -20,6 +20,7 @@ const workspaceId = process.env.WORKSPACE_ID || "default";
 const openClawStateDir = process.env.OPENCLAW_STATE_DIR || "/data/.clawdbot";
 const openClawWorkspaceDir = process.env.OPENCLAW_WORKSPACE_DIR || "/data/workspace";
 const openClawAgentKey = process.env.OPENCLAW_AGENT_KEY || "default";
+const openClawConversationId = String(process.env.OPENCLAW_CONVERSATION_ID || "").trim();
 const convexComponentName = process.env.AGENT_FACTORY_FUNCTION_NAMESPACE || "agentFactory";
 const skillsBootstrapMode = process.env.SKILLS_BOOTSTRAP_MODE || "off";
 const skillsBootstrapRequired = parseBooleanEnv(process.env.SKILLS_BOOTSTRAP_REQUIRED, false);
@@ -133,9 +134,14 @@ function hasMeaningfulOpenClawState() {
 }
 
 async function getLatestSnapshotForRestore() {
+  if (!openClawConversationId) {
+    log("Skipping snapshot restore lookup because OPENCLAW_CONVERSATION_ID is missing");
+    return null;
+  }
   return convexCall("query", convexComponentPath("workerLatestSnapshotForRestore"), {
     workspaceId,
     agentKey: openClawAgentKey,
+    conversationId: openClawConversationId,
   });
 }
 
@@ -165,6 +171,24 @@ async function restoreSnapshotIfNeeded() {
   rmSync(archivePath, { force: true });
   log(`Restored snapshot ${restore.snapshotId}`);
   return { skipped: false, snapshotId: restore.snapshotId };
+}
+
+function ensureWorkspaceMemoryFiles() {
+  mkdirSync(openClawWorkspaceDir, { recursive: true });
+  const memoryDir = `${openClawWorkspaceDir}/memory`;
+  mkdirSync(memoryDir, { recursive: true });
+
+  const memoryPath = `${openClawWorkspaceDir}/MEMORY.md`;
+  if (!existsSync(memoryPath)) {
+    writeFileSync(memoryPath, "# Long-Term Memory\n\n");
+    log("Seeded workspace MEMORY.md");
+  }
+
+  const dailyMemoryPath = `${memoryDir}/${new Date().toISOString().slice(0, 10)}.md`;
+  if (!existsSync(dailyMemoryPath)) {
+    writeFileSync(dailyMemoryPath, `# ${new Date().toISOString().slice(0, 10)}\n\n`);
+    log(`Seeded workspace daily memory ${dailyMemoryPath}`);
+  }
 }
 
 async function getWorkerGlobalSkillsManifest() {
@@ -410,6 +434,7 @@ async function main() {
   } catch (error) {
     warn(`restore failed before bootstrap: ${error instanceof Error ? error.message : String(error)}`);
   }
+  ensureWorkspaceMemoryFiles();
 
   try {
     await bootstrapGlobalSkillsIfConfigured();

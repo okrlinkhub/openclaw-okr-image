@@ -25,6 +25,7 @@ const openClawWorkspaceDir = process.env.OPENCLAW_WORKSPACE_DIR || "/data/worksp
 const openClawConfigPath = process.env.OPENCLAW_CONFIG_PATH || `${openClawStateDir}/openclaw.json`;
 const openClawGatewayToken = resolveGatewayToken();
 const openClawAgentKey = process.env.OPENCLAW_AGENT_KEY || "default";
+const openClawConversationId = String(process.env.OPENCLAW_CONVERSATION_ID || "").trim() || null;
 const convexComponentName = process.env.AGENT_FACTORY_FUNCTION_NAMESPACE || "agentFactory";
 
 if (!convexUrl) {
@@ -39,7 +40,7 @@ if (typeof WebSocket === "undefined") {
 let shuttingDown = false;
 let shutdownReason = null;
 let lastActivityAt = Date.now();
-let stickyConversationId = null;
+let stickyConversationId = openClawConversationId;
 let stickyAgentKey = openClawAgentKey;
 let snapshotCreatedForShutdown = false;
 let controlCheckCount = 0;
@@ -331,9 +332,13 @@ async function failSnapshotUpload(snapshotId, error) {
 }
 
 async function getLatestSnapshotForRestore() {
+  if (!stickyConversationId) {
+    return null;
+  }
   return convexCall("query", convexComponentPath("workerLatestSnapshotForRestore"), {
     workspaceId,
     agentKey: stickyAgentKey || openClawAgentKey,
+    conversationId: stickyConversationId,
   });
 }
 
@@ -926,7 +931,7 @@ async function processJob(job, hydration) {
 async function run() {
   console.log(`[worker] START workerId=${workerId}`);
   console.log(
-    `[worker] env CONVEX_URL=${convexUrl ? "SET" : "MISSING"} WORKSPACE_ID=${workspaceId} OPENCLAW_MVP_ENABLED=${openClawEnabled} OPENCLAW_GATEWAY_URL=${openClawGatewayUrl} OPENCLAW_AGENT_MODEL=${openClawAgentModel || "-"}`,
+    `[worker] env CONVEX_URL=${convexUrl ? "SET" : "MISSING"} WORKSPACE_ID=${workspaceId} OPENCLAW_MVP_ENABLED=${openClawEnabled} OPENCLAW_GATEWAY_URL=${openClawGatewayUrl} OPENCLAW_AGENT_MODEL=${openClawAgentModel || "-"} OPENCLAW_AGENT_KEY=${stickyAgentKey || "-"} OPENCLAW_CONVERSATION_ID=${stickyConversationId || "-"}`,
   );
   while (!shuttingDown) {
     try {
@@ -967,6 +972,9 @@ async function run() {
         console.log(`[worker] Sticky conversation=${stickyConversationId}`);
       } else if (job.conversationId !== stickyConversationId) {
         throw new Error(`sticky_mismatch: expected ${stickyConversationId}, got ${job.conversationId}`);
+      }
+      if (job.agentKey && stickyAgentKey && job.agentKey !== stickyAgentKey) {
+        throw new Error(`sticky_agent_mismatch: expected ${stickyAgentKey}, got ${job.agentKey}`);
       }
       lastActivityAt = Date.now();
       console.log(`[worker] Claimed messageId=${job.messageId} conversation=${job.conversationId}`);
