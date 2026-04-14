@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID, sign } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { basename, dirname, extname } from "node:path";
 
@@ -586,6 +586,112 @@ function isDirEffectivelyEmpty(path) {
   }
 }
 
+function utcDateString(value = new Date()) {
+  return value.toISOString().slice(0, 10);
+}
+
+function workspaceMemoryPaths(atMs = Date.now()) {
+  const now = new Date(atMs);
+  return {
+    memoryDir: `${openClawWorkspaceDir}/memory`,
+    memoryPath: `${openClawWorkspaceDir}/MEMORY.md`,
+    dailyMemoryPath: `${openClawWorkspaceDir}/memory/${utcDateString(now)}.md`,
+  };
+}
+
+function ensureWorkspaceMemoryFiles(atMs = Date.now()) {
+  const { memoryDir, memoryPath, dailyMemoryPath } = workspaceMemoryPaths(atMs);
+  mkdirSync(openClawWorkspaceDir, { recursive: true });
+  mkdirSync(memoryDir, { recursive: true });
+  if (!existsSync(memoryPath)) {
+    writeFileSync(
+      memoryPath,
+      [
+        "# Long-Term Memory",
+        "",
+        "## Durable Facts",
+        "",
+        "## User Preferences",
+        "",
+      ].join("\n"),
+    );
+  }
+  if (!existsSync(dailyMemoryPath)) {
+    writeFileSync(dailyMemoryPath, `# ${utcDateString(new Date(atMs))}\n\n## Conversation Notes\n\n`);
+  }
+  return { memoryPath, dailyMemoryPath };
+}
+
+function compactMemoryText(text, maxLength = 700) {
+  const normalized = String(text || "")
+    .replace(/\r/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (!normalized) return "";
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 3).trimEnd()}...` : normalized;
+}
+
+function escapeMemoryLine(text) {
+  return compactMemoryText(text).replace(/\n/g, " ").trim();
+}
+
+function appendDailyMemoryEntry({ conversationId, agentKey, userText, assistantText, atMs }) {
+  const { dailyMemoryPath } = ensureWorkspaceMemoryFiles(atMs);
+  const isoAt = new Date(atMs).toISOString();
+  const entry = [
+    `### ${isoAt}`,
+    `- Conversation: ${conversationId}`,
+    `- Agent: ${agentKey}`,
+    `- User: ${compactMemoryText(userText, 1200) || "(empty)"}`,
+    `- Assistant: ${compactMemoryText(assistantText, 1200) || "(empty)"}`,
+    "",
+  ].join("\n");
+  appendFileSync(dailyMemoryPath, `${entry}\n`);
+}
+
+function deriveLongTermMemoryCandidates(userText, assistantText) {
+  const normalized = String(userText || "").trim();
+  const candidates = [];
+  if (normalized) {
+    const rememberMatch = normalized.match(/(?:^|\b)remember(?: that)?[:\s]+(.+)/i);
+    if (rememberMatch?.[1]) {
+      candidates.push(`- Durable Facts: ${escapeMemoryLine(rememberMatch[1])}`);
+    }
+    const preferenceMatch = normalized.match(/\bi prefer\s+(.+)/i);
+    if (preferenceMatch?.[1]) {
+      candidates.push(`- User Preferences: prefers ${escapeMemoryLine(preferenceMatch[1])}`);
+    }
+    const nameMatch = normalized.match(/\bmy name is\s+(.+)/i);
+    if (nameMatch?.[1]) {
+      candidates.push(`- Durable Facts: user name is ${escapeMemoryLine(nameMatch[1])}`);
+    }
+    const callMeMatch = normalized.match(/\bcall me\s+(.+)/i);
+    if (callMeMatch?.[1]) {
+      candidates.push(`- User Preferences: call the user ${escapeMemoryLine(callMeMatch[1])}`);
+    }
+  }
+  const assistantNormalized = String(assistantText || "");
+  const assistantDecisionMatches = assistantNormalized.matchAll(
+    /(?:^|\n)\s*(?:Decision|Decided|Convention|Policy):\s*(.+)/gim,
+  );
+  for (const match of assistantDecisionMatches) {
+    if (match?.[1]) {
+      candidates.push(`- Durable Facts: ${escapeMemoryLine(match[1])}`);
+    }
+  }
+  return [...new Set(candidates.filter((candidate) => candidate.length > 0))];
+}
+
+function appendLongTermMemoryCandidates(userText, assistantText, atMs) {
+  const candidates = deriveLongTermMemoryCandidates(userText, assistantText);
+  if (candidates.length === 0) return;
+  const { memoryPath } = ensureWorkspaceMemoryFiles(atMs);
+  const existing = existsSync(memoryPath) ? readFileSync(memoryPath, "utf8") : "";
+  const missing = candidates.filter((candidate) => !existing.includes(candidate));
+  if (missing.length === 0) return;
+  appendFileSync(memoryPath, `${missing.join("\n")}\n`);
+}
+
 function hasMeaningfulOpenClawState() {
   const sessionsPath = `${openClawStateDir}/agents/main/sessions/sessions.json`;
   if (existsSync(sessionsPath)) {
@@ -903,9 +1009,18 @@ async function processJob(job, hydration) {
       };
   const replyText = stripMediaControlLines(openClawResult.reply);
   const audioPath = openClawResult.audioPaths.find((path) => existsSync(path));
+  const memoryAt = Date.now();
+  appendDailyMemoryEntry({
+    conversationId: job.conversationId,
+    agentKey: job.agentKey || stickyAgentKey || openClawAgentKey,
+    userText: enrichedIncomingText,
+    assistantText: replyText || "(audio)",
+    atMs: memoryAt,
+  });
+  appendLongTermMemoryCandidates(enrichedIncomingText, replyText || "(audio)", memoryAt);
   await appendConversationMessages(job.conversationId, [
-    { role: "user", content: enrichedIncomingText, at: Date.now() },
-    { role: "assistant", content: replyText || "(audio)", at: Date.now() + 1 },
+    { role: "user", content: enrichedIncomingText, at: memoryAt },
+    { role: "assistant", content: replyText || "(audio)", at: memoryAt + 1 },
   ]);
   if (audioPath) {
     const sentAudio = await sendTelegramAudioFromPath(

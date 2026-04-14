@@ -180,13 +180,26 @@ function ensureWorkspaceMemoryFiles() {
 
   const memoryPath = `${openClawWorkspaceDir}/MEMORY.md`;
   if (!existsSync(memoryPath)) {
-    writeFileSync(memoryPath, "# Long-Term Memory\n\n");
+    writeFileSync(
+      memoryPath,
+      [
+        "# Long-Term Memory",
+        "",
+        "## Durable Facts",
+        "",
+        "## User Preferences",
+        "",
+      ].join("\n"),
+    );
     log("Seeded workspace MEMORY.md");
   }
 
   const dailyMemoryPath = `${memoryDir}/${new Date().toISOString().slice(0, 10)}.md`;
   if (!existsSync(dailyMemoryPath)) {
-    writeFileSync(dailyMemoryPath, `# ${new Date().toISOString().slice(0, 10)}\n\n`);
+    writeFileSync(
+      dailyMemoryPath,
+      `# ${new Date().toISOString().slice(0, 10)}\n\n## Conversation Notes\n\n`,
+    );
     log(`Seeded workspace daily memory ${dailyMemoryPath}`);
   }
 }
